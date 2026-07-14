@@ -1,0 +1,49 @@
+frames:
+  map: map
+  imu: imu_link
+  lidar: livox_frame
+
+dataset:
+  lidar:
+    dir: LiDAR
+    pattern: "*.bin"
+    format: conpr_livox_bin
+    timestamp_unit: ns
+    time_shift_sec: -0.000705
+    drop_zero_points: true
+  imu:
+    path: imu.csv
+    timestamp_unit: ns
+    delimiter: ","
+  gt:
+    enabled: true
+    path: pose.csv
+    timestamp_unit: ns
+    delimiter: ","
+
+bag:
+  storage_id: sqlite3
+  lidar:
+    enabled: true
+    topic: /livox/points
+    message: pointcloud2
+    fields_preset: xyzi_t_tag_line
+  imu:
+    enabled: true
+    topic: /livox/imu
+  gt:
+    enabled: true
+    topic: /gt/odom
+    publish_at: lidar
+    orientation: nearest_imu
+  tf_static:
+    enabled: true
+    topic: /tf_static
+    parent_frame: imu_link
+    child_frame: livox_frame
+    matrix_is: parent_to_child
+    matrix:
+      - [-0.018460000, 0.999828000, -0.001635000, -0.087913955]
+      - [-0.999815000, -0.018451000, 0.005515000, 0.001421024]
+      - [0.005484000, 0.001736000, 0.999983000, 0.001859043]
+      - [0.0, 0.0, 0.0, 1.0]

@@ -1,0 +1,36 @@
+frames:
+  map: map
+  imu: imu_link
+  lidar: livox_frame
+
+dataset:
+  lidar:
+    dir: LiDAR
+    pattern: "*.bin"
+    format: conpr_livox_bin
+    timestamp_unit: ns
+    time_shift_sec: -0.000705
+    drop_zero_points: true
+  imu:
+    path: imu.csv
+    timestamp_unit: ns
+    delimiter: ","
+  gt:
+    enabled: false
+
+bag:
+  storage_id: sqlite3
+  lidar:
+    enabled: true
+    topic: /livox/lidar
+    message: livox_custom
+    offset_time_scale: ns_to_us
+    lidar_id: 0
+    rsvd: [0, 0, 0]
+  imu:
+    enabled: true
+    topic: /livox/imu
+  gt:
+    enabled: false
+  tf_static:
+    enabled: false
