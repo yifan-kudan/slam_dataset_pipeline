@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 ROOT_DIR="/home/kudan/Downloads/datasets/ConPR" # Change this to your dataset root directory
 BAG_GLOB="*_fastlio_bag" # Change this to your bag discovery glob
 PLAY_RATE="1.0"
+READ_AHEAD_QUEUE_SIZE="10000"
 OPEN_RVIZ=1
 RECORD_ODOM=0
 EVAL_ODOM=0
 RVIZ_CONFIG="/home/kudan/prj/FAST_LIO_ROS2/rviz/fastlio.rviz"
-CONFIG_FILE="fast_lio_conpr.yaml" # Change this config file for different datasets (e.g., fast_lio_conpr.yaml, fast_lio_conslam.yaml, etc.)
+CONFIG_FILE="conpr/fast_lio_conpr.yaml" # Config relative to config-path. For ConSLAM use conslam/fast_lio_conslam.yaml
+CONFIG_PATH_OVERRIDE="" # If set (via --config-path), overrides the default repo config/ dir
 MAP_OUTPUT_DIR=""
 ODOM_OUTPUT_DIR=""
 FASTLIO_ODOM_TOPIC="/Odometry"
@@ -30,7 +34,10 @@ Usage:
 Options:
   --root DIR          Dataset root directory. Default: /home/kudan/Downloads/datasets/ConPR
   --glob PATTERN      Auto-discovery glob under root. Default: *_fastlio_bag
+  --config-file NAME  FAST-LIO config, relative to config-path. Default: conpr/fast_lio_conpr.yaml
+  --config-path DIR   Directory holding the FAST-LIO config. Default: <repo>/config
   -r, --rate RATE     ros2 bag play rate. Default: 1.0
+  --queue-size N      ros2 bag play --read-ahead-queue-size. Default: 10000
   --no-rviz           Do not open RViz
   --record-odom       Record FAST-LIO odometry topic while playing each bag
   --eval-odom         Export recorded odometry and evaluate against SEQUENCE/pose.csv
@@ -83,9 +90,24 @@ while [[ $# -gt 0 ]]; do
       BAG_GLOB="$2"
       shift 2
       ;;
+    --config-file)
+      require_arg "$1" "${2:-}"
+      CONFIG_FILE="$2"
+      shift 2
+      ;;
+    --config-path)
+      require_arg "$1" "${2:-}"
+      CONFIG_PATH_OVERRIDE="$2"
+      shift 2
+      ;;
     -r|--rate)
       require_arg "$1" "${2:-}"
       PLAY_RATE="$2"
+      shift 2
+      ;;
+    --queue-size)
+      require_arg "$1" "${2:-}"
+      READ_AHEAD_QUEUE_SIZE="$2"
       shift 2
       ;;
     --no-rviz)
@@ -137,7 +159,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CONFIG_PATH="${ROOT_DIR}/process"
+CONFIG_PATH="${CONFIG_PATH_OVERRIDE:-${SCRIPT_DIR}/config}"
 MAP_SOURCE="${ROOT_DIR}/maps/fastlio_map.pcd"
 if [[ -z "$MAP_OUTPUT_DIR" ]]; then
   MAP_OUTPUT_DIR="${ROOT_DIR}/maps/fastlio_runs"
@@ -265,7 +287,7 @@ for bag in "${bag_paths[@]}"; do
     sleep 2
   fi
 
-  ros2 bag play "$bag" --clock -r "$PLAY_RATE"
+  ros2 bag play "$bag" --clock -r "$PLAY_RATE" --read-ahead-queue-size "$READ_AHEAD_QUEUE_SIZE"
 
   if [[ -n "${ODOM_RECORD_PID:-}" ]] && kill -0 "$ODOM_RECORD_PID" 2>/dev/null; then
     kill -- "-$ODOM_RECORD_PID" 2>/dev/null || kill "$ODOM_RECORD_PID" 2>/dev/null || true
