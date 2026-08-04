@@ -4,7 +4,7 @@ Splits the PointCloud2 handling into the part that is **fixed by the ROS message
 spec** and the part that **varies per dataset**, so the varying part can be
 configured instead of edited:
 
-fixed (lives here as constants, never needs touching)
+fixed
   * ``PC2_DATATYPES`` -- the ``sensor_msgs/PointField.datatype`` enum. Values
     1..8 (INT8..FLOAT64), identical in ROS 1 and ROS 2, so any spec-conforming
     cloud is covered.
@@ -12,20 +12,12 @@ fixed (lives here as constants, never needs touching)
     hardcoded little-endian.
 
 varies per dataset (configurable; defaults below are just the common cases)
-  * field *names*: the per-point time field is ``time`` on Velodyne, ``t`` on
-    Ouster, ``timestamp`` on Hesai, ``offset_time`` on Livox; the ring field is
-    ``ring``, ``channel``, ``line`` or ``laser_id``. See ``DEFAULT_TIME_FIELDS`` /
-    ``DEFAULT_RING_FIELDS`` -- ``inspect_bag.py`` takes overrides on the command
-    line, ``rosbag1_to_ros2.py`` takes the chosen name as ``time_field``.
-  * field *units*: the same ``float32 time`` may hold seconds, milliseconds,
-    microseconds or nanoseconds. See ``TIME_UNIT_TO_NS``; the converter takes
-    ``time_unit`` per topic and ``inspect_bag.py`` guesses it from the value range.
+  * field *names*
+  * field *units*
   * absolute vs scan-relative per-point time (Hesai ships absolute Unix seconds).
     ``epoch_kind`` classifies a stamp; the converter's ``repack`` handles it.
 
-Used by ``inspect_bag.py`` (read-only probing) and ``rosbag1_to_ros2.py``
-(rewriting), which previously carried two near-duplicate copies of the datatype
-table and the strided-read idiom.
+Used by ``inspect_bag.py``, ``rosbag1_to_ros2.py`` and ``to_bag.py``.
 """
 from typing import Any
 
@@ -40,8 +32,7 @@ PC2_DATATYPES: dict[int, tuple[str, str]] = {
     5: ("i4", "int32"), 6: ("u4", "uint32"), 7: ("f4", "float32"), 8: ("f8", "float64"),
 }
 
-# Per-point time / ring field names, by vendor. Only defaults: pass your own when
-# a dataset uses something else.
+# Per-point time / ring field names, by vendor.
 DEFAULT_TIME_FIELDS: tuple[str, ...] = (
     "time",         # Velodyne / FAST-LIO velodyne_handler
     "t",            # Ouster
@@ -50,12 +41,34 @@ DEFAULT_TIME_FIELDS: tuple[str, ...] = (
     "offset_time",  # Livox
 )
 DEFAULT_RING_FIELDS: tuple[str, ...] = ("ring", "channel", "line", "laser_id")
+DEFAULT_INTENSITY_FIELDS: tuple[str, ...] = (
+    "intensity",
+    "i",
+    "reflectivity",  # Livox / Ouster
+    "reflectance",
+    "refl",
+)
+
+# Canonical per-point quantity names used to decouple *readers* from *writers*:
+# every loader in to_bag.py emits these names, and every output layout below is
+# expressed in terms of them, so an input format and an output layout can be
+# paired without either knowing about the other.
+#
+#   x, y, z    metres
+#   intensity  whatever the sensor reports
+#   time       SECONDS since the scan start (relative), matching the Velodyne
+#              convention that repack_hesai_to_velodyne() also targets
+#   ring       laser/beam index
+#   tag, line  Livox-specific per-point flags
+CANONICAL_POINT_FIELDS: tuple[str, ...] = (
+    "x", "y", "z", "intensity", "time", "ring", "tag", "line",
+)
 
 # Per-point time units seen in the wild -> multiplier to nanoseconds / to seconds.
-# Ordered coarse->fine; guess_time_unit() relies on that order. Both tables are
+# Ordered coarse->fine; infer_time_unit() relies on that order. Both tables are
 # spelled out rather than deriving one from the other: absolute Unix values are
 # ~1.7e9 s, and routing them through nanoseconds (*1e9 then /1e9) costs ~130 ns of
-# float64 precision -- visible once the result lands in a float32 `time` field.
+# float64 precision.
 TIME_UNIT_TO_NS: dict[str, float] = {"s": 1e9, "ms": 1e6, "us": 1e3, "ns": 1.0}
 TIME_UNIT_TO_S: dict[str, float] = {"s": 1.0, "ms": 1e-3, "us": 1e-6, "ns": 1e-9}
 
@@ -68,7 +81,7 @@ UNIX_LO_NS, UNIX_HI_NS = 1_000_000_000_000_000_000, 2_000_000_000_000_000_000
 
 
 def type_name(datatype: int) -> str:
-    """Human-readable name for a PointField datatype enum value."""
+    """Readable name for a PointField datatype enum value."""
     entry = PC2_DATATYPES.get(datatype)
     return entry[1] if entry else f"datatype{datatype}"
 
@@ -85,7 +98,7 @@ def numpy_code(datatype: int, is_bigendian: bool = False) -> str:
 
 
 def find_field(msg: Any, candidates: tuple[str, ...] | list[str]) -> Any | None:
-    """First PointField in ``msg`` whose name is in ``candidates`` (in that order)."""
+    """First PointField in ``msg`` whose name is in ``candidates``."""
     by_name = {f.name: f for f in msg.fields}
     for name in candidates:
         if name in by_name:
@@ -94,9 +107,7 @@ def find_field(msg: Any, candidates: tuple[str, ...] | list[str]) -> Any | None:
 
 
 def field_view(buf: Any, msg: Any, field: Any, strict: bool = False) -> np.ndarray:
-    """Zero-copy strided view of one field across every point of ``msg``.
-
-    PointCloud2 stores points interleaved, so field *i* of point *k* lives at
+    """PointCloud2 stores points interleaved, so field *i* of point *k* lives at
     ``k * point_step + field.offset``; a numpy view with ``strides=(point_step,)``
     reads the whole column without unpacking in Python.
 
@@ -139,13 +150,7 @@ def _scale(table: dict[str, float], unit: str) -> float:
         ) from None
 
 
-def guess_time_unit(span: float) -> str | None:
-    """Guess a per-point time field's unit from its observed min..max span.
-
-    The span of one scan is one revolution, so whichever unit maps the raw span
-    into a plausible scan duration is almost certainly the right one. Returns
-    None when no unit fits (all-zero field, or something that is not a scan).
-    """
+def infer_time_unit(span: float) -> str | None:
     for unit, scale in TIME_UNIT_TO_NS.items():
         span_s = span * scale / 1e9
         if SCAN_SPAN_MIN_S <= span_s <= SCAN_SPAN_MAX_S:
@@ -164,7 +169,7 @@ def span_warning(span_ns: float, field_name: str, unit: str) -> str | None:
                 f"no intra-scan timing, so de-skew will do nothing")
     span_s = span_ns / 1e9
     if not (SCAN_SPAN_MIN_S <= span_s <= SCAN_SPAN_MAX_S):
-        better = guess_time_unit(span_ns / TIME_UNIT_TO_NS[unit])
+        better = infer_time_unit(span_ns / TIME_UNIT_TO_NS[unit])
         hint = f"; try time_unit: {better}" if better and better != unit else ""
         return (f"per-point '{field_name}' spans {span_s:.6g} s when read as "
                 f"time_unit: {unit} -- not a plausible scan duration "
@@ -179,3 +184,145 @@ def epoch_kind(ns: int | float) -> str:
     if abs(ns) < UNIX_LO_NS:
         return "sensor_relative"
     return "unknown"
+
+
+# --------------------------------------------------------------------------
+# Warn-once bookkeeping (shared so a per-topic warning fires once per run
+# regardless of which converter emitted it).
+# --------------------------------------------------------------------------
+_warned_topics: set[str] = set()
+
+
+def warn_once(topic: str, message: str | None) -> None:
+    if message and topic not in _warned_topics:
+        _warned_topics.add(topic)
+        print(f"WARNING [{topic}]: {message}")
+
+
+def reset_warnings() -> None:
+    """Forget which warnings have fired, so a second in-process conversion reports
+    its own. Each converter's ``convert()`` calls this on entry; a CLI run (one
+    conversion per process) is unaffected."""
+    _warned_topics.clear()
+
+
+# --------------------------------------------------------------------------
+# Output cloud layouts
+#
+# The reader side of a converter is dataset-specific; the *writer* side is
+# dictated by what the consuming SLAM node expects, and there are only a handful
+# of those. Naming them here gives both converters one vocabulary: `velodyne` is
+# byte-for-byte the layout repack_hesai_to_velodyne() produces, so a bag built
+# from raw files and a bag repacked from a ROS 1 recording are interchangeable.
+#
+# Each entry is a list of (output field name, canonical source name, type name).
+# Offsets and point_step are computed by build_layout() unless overridden.
+# --------------------------------------------------------------------------
+NAME_TO_DATATYPE: dict[str, int] = {name: enum for enum, (_, name) in PC2_DATATYPES.items()}
+
+LAYOUT_PRESETS: dict[str, list[tuple[str, str, str]]] = {
+    # Bare geometry + intensity. Understood by essentially every consumer, but
+    # carries no timing, so motion de-skew is disabled.
+    "xyzi": [
+        ("x", "x", "float32"), ("y", "y", "float32"), ("z", "z", "float32"),
+        ("intensity", "intensity", "float32"),
+    ],
+    # FAST-LIO velodyne_handler / kd_localizer: float32 `time` seconds relative to
+    # the header stamp, uint16 `ring`. Matches repack_hesai_to_velodyne() exactly.
+    "velodyne": [
+        ("x", "x", "float32"), ("y", "y", "float32"), ("z", "z", "float32"),
+        ("intensity", "intensity", "float32"),
+        ("time", "time", "float32"), ("ring", "ring", "uint16"),
+    ],
+    # Ouster driver layout: `t` is uint32 NANOSECONDS from scan start.
+    "ouster": [
+        ("x", "x", "float32"), ("y", "y", "float32"), ("z", "z", "float32"),
+        ("intensity", "intensity", "float32"),
+        ("t", "time", "uint32"), ("ring", "ring", "uint16"),
+    ],
+    # Livox PointCloud2 (not CustomMsg): keeps the tag/line per-point flags.
+    "livox_pc2": [
+        ("x", "x", "float32"), ("y", "y", "float32"), ("z", "z", "float32"),
+        ("intensity", "intensity", "float32"), ("time", "time", "float32"),
+        ("tag", "tag", "uint8"), ("line", "line", "uint8"),
+    ],
+}
+
+def default_time_unit(type_name_: str) -> str:
+    """Unit a per-point time column is written in, given its output type.
+
+    The canonical `time` is float seconds, but an integer output column cannot
+    hold that -- 0.1 s truncates to 0. Integer columns therefore default to
+    nanoseconds (the Ouster `t` convention) and float columns to seconds (the
+    Velodyne `time` convention). Deriving this from the *type* rather than from
+    the preset name means a hand-written `fields:` list gets it right too; a
+    config can still override with an explicit `unit:`.
+    """
+    return "s" if type_name_.startswith("float") else "ns"
+
+
+def normalize_layout(spec: Any, preset_name: str = "") -> list[dict[str, Any]]:
+    """Normalize a layout preset name or explicit field list to field dicts.
+
+    An explicit list entry is ``{name, type, from?, offset?, unit?}``; ``from`` is
+    the canonical source name (see CANONICAL_POINT_FIELDS) and defaults to
+    ``name``, which is what lets a config rename a column (e.g. emit `t` instead
+    of `time`) without touching any reader.
+    """
+    if isinstance(spec, str):
+        if spec not in LAYOUT_PRESETS:
+            raise SystemExit(
+                f"unknown layout preset {spec!r}; known: {sorted(LAYOUT_PRESETS)}"
+                f" (or give an explicit `fields:` list)"
+            )
+        return [{"name": n, "from": s, "type": t, "unit": default_time_unit(t)}
+                for n, s, t in LAYOUT_PRESETS[spec]]
+    if not isinstance(spec, list) or not spec:
+        raise SystemExit(f"{preset_name or 'layout'} must be a preset name or a non-empty field list")
+    out = []
+    for f in spec:
+        name = f["name"]
+        typ = f.get("type", "float32")
+        if typ not in NAME_TO_DATATYPE:
+            raise SystemExit(
+                f"unknown point field type {typ!r} for field {name!r}; "
+                f"known: {sorted(NAME_TO_DATATYPE)}"
+            )
+        unit = f.get("unit", default_time_unit(typ))
+        if unit not in TIME_UNIT_TO_S:
+            raise SystemExit(f"unknown unit {unit!r} for field {name!r}; "
+                             f"known: {sorted(TIME_UNIT_TO_S)}")
+        entry = {"name": name, "from": f.get("from", name), "type": typ, "unit": unit}
+        if "offset" in f:
+            entry["offset"] = int(f["offset"])
+        out.append(entry)
+    return out
+
+
+def build_layout(fields: list[dict[str, Any]], point_step: int | None = None
+                 ) -> tuple[np.dtype, list[dict[str, Any]], int]:
+    """Assign offsets, build the packed numpy dtype, return (dtype, fields, step).
+
+    Offsets default to tight packing in declaration order; any field may pin its
+    own. ``point_step`` defaults to the end of the last field -- note this reads
+    the *layout-level* key, not a key buried in the first field, which is where
+    the previous implementation looked for it (and so never found it).
+    """
+    cursor, resolved = 0, []
+    for f in fields:
+        code, _ = PC2_DATATYPES[NAME_TO_DATATYPE[f["type"]]]
+        offset = f.get("offset", cursor)
+        resolved.append({**f, "offset": offset})
+        cursor = offset + np.dtype(code).itemsize
+    step = int(point_step) if point_step else cursor
+    if step < cursor:
+        raise SystemExit(f"point_step {step} is smaller than the packed field extent {cursor}")
+    dtype = np.dtype({
+        "names": [f["name"] for f in resolved],
+        "formats": ["<" + PC2_DATATYPES[NAME_TO_DATATYPE[f["type"]]][0]
+                    if not PC2_DATATYPES[NAME_TO_DATATYPE[f["type"]]][0].endswith("1")
+                    else PC2_DATATYPES[NAME_TO_DATATYPE[f["type"]]][0] for f in resolved],
+        "offsets": [f["offset"] for f in resolved],
+        "itemsize": step,
+    })
+    return dtype, resolved, step
