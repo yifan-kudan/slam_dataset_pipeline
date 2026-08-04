@@ -1,0 +1,10 @@
+# Local, machine-specific dataset configs (contain absolute paths)
+config/
+docs
+docker
+results
+.claude
+__pycache__/
+imgui.ini
+run_fastlio_bag.py
+to_bag_config.md
