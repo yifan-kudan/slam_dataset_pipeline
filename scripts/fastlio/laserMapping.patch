@@ -1,0 +1,108 @@
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+index d441261..ffee71a 100644
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -97,6 +97,9 @@ int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudVal
+ bool   point_selected_surf[100000] = {0};
+ bool   lidar_pushed, flg_first_scan = true, flg_exit = false, flg_EKF_inited;
+ bool   scan_pub_en = false, dense_pub_en = false, scan_body_pub_en = false;
++// Whether publish_map() also PUBLISHES the accumulated cloud, as opposed to only
++// accumulating it for /map_save. See the parameter declaration for why.
++bool   map_publish_en = true;
+ bool    is_first_lidar = true;
+ 
+ vector<vector<int>>  pointSearchInd_surf; 
+@@ -592,6 +595,17 @@ void publish_map(rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub
+     }
+     *pcl_wait_pub += *laserCloudWorld;
+ 
++    // The append above is what /map_save writes out and is always done. The publish
++    // below re-serialises the WHOLE accumulated cloud on every fire, so its cost grows
++    // with the square of the run length: on Hilti site2_robot_1 (28.2 M points saved,
++    // map_period_ms 370) the last messages are ~900 MB each, every 370 ms. That starves
++    // the node's own callback thread, the reader stops draining the shared-memory port,
++    // and the best-effort cloud writer then drops -- 2906 of 6994 frames, with the loss
++    // ramping up exactly as the cloud grows. It is a viewer-only publication (nothing
++    // subscribes to /Laser_map in a headless run), so it is now optional and the
++    // accumulation is not.
++    if (!map_publish_en) return;
++
+     sensor_msgs::msg::PointCloud2 laserCloudmsg;
+     pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
+     // laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+@@ -804,10 +818,23 @@ public:
+         this->declare_parameter<bool>("publish.scan_publish_en", true);
+         this->declare_parameter<bool>("publish.dense_publish_en", true);
+         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
++        // Period of the timer that appends the current scan to pcl_wait_pub --
++        // the cloud /map_save writes out. The lidar runs at 100 ms, so the 1000 ms
++        // default keeps only 1 scan in 10 and the saved map is correspondingly
++        // sparse. Lower it to densify the saved map; it does not touch odometry.
++        this->declare_parameter<int>("publish.map_period_ms", 1000);
++        // Publish the accumulated map cloud on /Laser_map, as well as accumulating it
++        // for /map_save. true is upstream behaviour; false keeps the saved map identical
++        // and removes a cost that grows with the square of the run length (see
++        // publish_map). Set it false for any headless batch run.
++        this->declare_parameter<bool>("publish.map_publish_en", true);
+         this->declare_parameter<int>("max_iteration", 4);
+         this->declare_parameter<string>("map_file_path", "");
+         this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
+         this->declare_parameter<string>("common.imu_topic", "/livox/imu");
++        // Reader history for /imu. 10 is upstream; see the subscription for why 400 Hz
++        // needs more than 25 ms of it.
++        this->declare_parameter<int>("common.imu_queue_size", 10);
+         this->declare_parameter<bool>("common.time_sync_en", false);
+         this->declare_parameter<double>("common.time_offset_lidar_to_imu", 0.0);
+         this->declare_parameter<double>("filter_size_corner", 0.5);
+@@ -837,6 +864,7 @@ public:
+         this->get_parameter_or<bool>("publish.path_en", path_en, true);
+         this->get_parameter_or<bool>("publish.effect_map_en", effect_pub_en, false);
+         this->get_parameter_or<bool>("publish.map_en", map_pub_en, false);
++        this->get_parameter_or<bool>("publish.map_publish_en", map_publish_en, true);
+         this->get_parameter_or<bool>("publish.scan_publish_en", scan_pub_en, true);
+         this->get_parameter_or<bool>("publish.dense_publish_en", dense_pub_en, true);
+         this->get_parameter_or<bool>("publish.scan_bodyframe_pub_en", scan_body_pub_en, true);
+@@ -924,9 +952,29 @@ public:
+         }
+         else
+         {
++            // Upstream QoS, deliberately. best_effort DOES lose ~50% of 1.37 MB Hilti
++            // clouds on this host, but the loss is writer-side: Fast DDS puts intra-host
++            // payload on shared memory (kernel UDP counters stay at zero) and the default
++            // SHM segment cannot hold that sample stream, so the writer drops instead of
++            // waiting. Fix it OUTSIDE the code -- export FASTRTPS_DEFAULT_PROFILES_FILE=
++            // kd_localizer_docker/tools/fastdds_shm_big.xml (128 MB segment) on both the
++            // player and this node: 929/929 clouds vs 331/929 without. Forcing reliable
++            // here also works offline but cannot match a real LiDAR driver publishing
++            // best_effort, which would break this node on hardware.
+             sub_pcl_pc_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, rclcpp::SensorDataQoS(), standard_pcl_cbk);
+         }
+-        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 10, imu_cbk);
++        // Upstream passes a bare 10, i.e. reliable KeepLast(10) -- 25 ms of buffer at the
++        // Hilti handheld rig's 400 Hz. The LiDAR callback runs on the same single-threaded
++        // executor and takes 4-8 ms per scan with occasional spikes, so the queue can
++        // overflow and the reader drops IMU samples it never sees. The signature is that
++        // the ESTIMATE depends on playback rate even at 100 % cloud delivery, and only on
++        // the 400 Hz rig: at -r 0.3 the same bags score 3.5x, 13x and 2.3x better while
++        // the 200 Hz robot is identical to three significant figures. imu_cbk only pushes
++        // onto a deque, so a deep queue costs memory and nothing else.
++        int imu_queue = 10;
++        this->get_parameter_or<int>("common.imu_queue_size", imu_queue, 10);
++        sub_imu_ = this->create_subscription<sensor_msgs::msg::Imu>(
++            imu_topic, rclcpp::QoS(rclcpp::KeepLast(imu_queue)), imu_cbk);
+         pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
+         pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
+         pubLaserCloudEffect_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_effected", 20);
+@@ -939,7 +987,11 @@ public:
+         auto period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0 / 100.0));
+         timer_ = rclcpp::create_timer(this, this->get_clock(), period_ms, std::bind(&LaserMappingNode::timer_callback, this));
+ 
+-        auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(1000.0));
++        int map_period_ms_param = 1000;
++        this->get_parameter_or<int>("publish.map_period_ms", map_period_ms_param, 1000);
++        if (map_period_ms_param < 1) map_period_ms_param = 1;
++        RCLCPP_INFO(this->get_logger(), "Map accumulation period: %d ms (dense=%d, publish=%d)", map_period_ms_param, (int)dense_pub_en, (int)map_publish_en);
++        auto map_period_ms = std::chrono::milliseconds(static_cast<int64_t>(map_period_ms_param));
+         map_pub_timer_ = rclcpp::create_timer(this, this->get_clock(), map_period_ms, std::bind(&LaserMappingNode::map_publish_callback, this));
+ 
+         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));

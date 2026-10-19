@@ -1,0 +1,107 @@
+<div class="page">
+
+  <header class="mast">
+    <div class="kicker">
+      <span>Hilti SLAM Challenge 2023</span><span>site1 · site2 · site3</span>
+      <span>15 条序列 · 全部</span><span>2026-08-19</span>
+    </div>
+    <h1>十五条 Hilti 序列：FAST-LIO2 建图与 kd_localizer 定位</h1>
+    <p class="standfirst">
+      这份报告覆盖数据集里全部 15 条可用序列 —— 上一份只写了 site2 的 5 条，且没有一张图。
+      结论没有翻转，但两个核心发现现在有了跨全部 15 条的证据：
+      <strong>重力先验与 FAST-LIO 地图系不兼容</strong>，以及
+      <strong>误差由控制点之间的垂直落差决定，不由距离或时长决定</strong>。
+    </p>
+  </header>
+
+  <dl class="strip">
+    <div><dt>序列</dt><dd>15<span> / 15</span></dd></div>
+    <div><dt>录制时长</dt><dd>3 341<span> s</span></dd></div>
+    <div><dt>点云</dt><dd>33 359<span> 帧</span></dd></div>
+    <div><dt>零 Lost</dt><dd>7<span> / 14</span></dd></div>
+    <div><dt>最好精度</dt><dd>1.7<span> cm</span></dd></div>
+    <div><dt>与 FAST-LIO</dt><dd>7–31<span> mm</span></dd></div>
+    <div><dt>重力倾角</dt><dd>88–180<span>°</span></dd></div>
+    <div><dt>建出地图</dt><dd>14<span> / 15</span></dd></div>
+  </dl>
+
+  <section>
+    <h2><span class="ord">01</span> 结论 <em>summary</em></h2>
+    <div class="col">
+      <p class="lede">
+        平台决定结果，路线决定成败：机器人平台干净，手持平台在单层路线上同样干净，
+        而跨楼层的路线全部失败 —— 失败点在上游的里程计几何，不在定位器。
+      </p>
+      <p>
+        <strong>14 条序列跑了 kd_localizer，其中 7 条零 Lost、跟完整包。</strong>
+        分界线干净得出奇：那 7 条覆盖 98.9–99.9%（缺的那不到 1% 是开头的初始化），
+        另外 7 条覆盖 18–90%。
+        零 Lost 的 7 条是三条机器人与 site3 四条手持。
+        机器人两条单层序列是 <strong>3.6</strong> 与 <strong>5.2 cm</strong>，
+        而唯一跨楼层的 <code>site2_robot_1</code> 是 20.6 cm —— 这个差距不是偶然，正是
+        <span class="mono">§04</span> 那条规律。site3 四条全部单层，
+        <strong>1.7–6.9 cm</strong>，其中 <code>site3_handheld_1</code>
+        的 1.7 / 3.1 cm 是全部序列里最好的。
+        site1 五条在 36–90% 处发散，但<em class="i">跟踪期间</em>精度是 1.2–4.1 cm ——
+        <code>site1_handheld_4</code> 在同一批控制点上比建出它地图的 FAST-LIO 更准
+        （1.2 对 2.4 cm）。
+      </p>
+      <p>
+        <strong>site2 三条手持是唯一整体失败的一组，原因在上游。</strong>
+        <code>site2_handheld_5</code> 的 FAST-LIO 彻底发散（峰值 249 m/s，最终离起点 9 259 m），
+        <em class="i">没有地图可建</em>，因此它是 15 条里唯一没有 kd_localizer 运行的一条。
+        另两条建出了地图，但那两张地图本身跨层错 1.4–1.7 m
+        （<code>site2_handheld_6</code> 后来用它 <code>-r 0.15</code> 的云重建了一张 15.7 cm 的<em class="i">有效</em>地图，
+        本报告用的就是那张）。
+      </p>
+      <p>
+        这次新增的一条判断是：<strong><code>site2_handheld_6</code> 那次 Lost 是<em class="i">确证的</em>误报。</strong>
+        它在 t+43.1 s 被判 <code>Pose covariance is too high (Rotation Y)</code>，
+        而那一刻内点率 <strong>0.98</strong>；更要紧的是，它在被判 Lost 之前的整个跟踪段
+        与那张地图对应的 FAST-LIO 轨迹一致到 <strong>16 mm 中位 / 152 mm 最大</strong>。
+        上一份报告只能用内点率说它「看起来健康」，现在有轨迹级证据说它<em class="i">确实</em>是对的。
+      </p>
+      <p>
+        两个跨全部 15 条成立的发现见 <span class="mono">§03</span> 与 <span class="mono">§04</span>。
+        逐序列图在 <span class="mono">§07</span>，每条一张：地图的平面图与剖面图、
+        两条轨迹的直接比对、以及决定「这次运行能不能信」的三条诊断曲线。
+      </p>
+    </div>
+
+    <figure>
+      <div class="figmat"><!--FIG:fig_coverage--></div>
+      <figcaption>
+        <b>图 1 · 全部 15 条：覆盖率与精度</b>
+        左：kd_localizer 在第一次判 Lost 之前跟通的比例（没有 Lost 的按整包计）。
+        右：同一个包上两个系统对测绘控制点的成对距离误差，用线连起来 ——
+        线越短说明定位器越贴近建出它地图的里程计，线朝左说明它比里程计更准。
+        <code>site2_handheld_5</code> 没有地图所以没有运行；三条只有 1 个控制点在跟踪窗口内的序列
+        不产出精度数字，按此标注。
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="ord">02</span> 数据清点 <em>inventory</em></h2>
+    <div class="col">
+      <p>
+        全部 15 个包都是 <code>rosbag2 metadata v8</code>（Humble 与 Jazzy 通读），
+        点云 <code>/velodyne_points</code> 实测 9.96–10.00 Hz，
+        IMU <code>/imu</code> 手持 ~399 Hz、机器人 200 Hz。
+        合计 <strong>3 341 s、33 359 帧点云、106 万条 IMU、44.3 GB</strong>。
+      </p>
+      <p>
+        <strong>15 个包里有 10 个不带 <code>/tf_static</code></strong> ——
+        site1 五条、site3 四条、<code>site2_robot_2</code>。它们是用仓库的
+        <code>config/hilti/rebag_hilti_fastlio.yaml</code> 抽出来的，而那份配置把这条话题丢掉了
+        （FAST-LIO 从自己的配置读外参、根本不看 tf）。kd_localizer 不行：
+        <code>base_frame_id: imu_link</code> 配 <code>velodyne</code> 系的点云，
+        必须从 TF 查外参，否则永远停在 <code>UNINITIALIZED</code>。
+        本次没有重做这 10 个包，改成运行时补发 <code>imu_link → velodyne</code>；
+        取值是官方 kalibr <code>lidar0.T_here_imu0</code> 的求逆值，
+        与另外 5 个包自带的 <code>/tf_static</code> 以及 <code>fast_lio_hilti*.yaml</code> 的
+        <code>extrinsic_T</code> 双向核对过。
+      </p>
+    </div>
+    <div class="scroll"><!--TBL:bags--></div>
+  </section>

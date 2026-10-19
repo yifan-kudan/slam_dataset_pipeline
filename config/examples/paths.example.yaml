@@ -1,0 +1,81 @@
+# Every absolute path the pipeline needs, in one file. Copy to config/paths.yaml
+# (which is gitignored, like every other machine-specific config here) and adjust.
+# src/paths.py falls back to THIS file when config/paths.yaml is absent, so a fresh
+# checkout runs without a copy step as long as the defaults below fit the machine.
+#
+# Values may reference:
+#   ${VAR}              an environment variable; missing -> error naming the key
+#   ${VAR:-fallback}    ... with a fallback (which may itself reference more)
+#   ${some.other.key}   another key in THIS file (dotted path), so a root is
+#                       written once and derived paths follow it
+#   ${SDP_REPO}         always defined: this checkout, for repo-relative files
+#   ~                   the current user's home
+#
+# `python3 src/paths.py` prints every resolved value and flags the ones that do
+# not exist on disk -- run it first when a script cannot find something.
+
+ros:
+  # `source`d to build the environment every ROS child process inherits.
+  setup: ${SDP_ROS_SETUP:-/opt/ros/jazzy/setup.bash}
+  # Overlays sourced after ROS, in order. A missing one is skipped with a warning:
+  # ws_livox is only needed to replay livox_ros_driver2/CustomMsg bags.
+  overlays:
+    - ${SDP_WS_LIVOX:-${HOME}/prj/ws_livox/install/setup.bash}
+    - ${SDP_FASTLIO_WS:-${HOME}/prj/fast_lio_ws/install/setup.bash}
+  # Interpreter for the scripts that import rclpy / rosbag2_py. Must be the system
+  # python the ROS packages were built against, not a conda or venv one.
+  python: ${SDP_ROS_PYTHON:-/usr/bin/python3}
+
+  # Fast DDS participant profile, exported as FASTRTPS_DEFAULT_PROFILES_FILE for
+  # BOTH the node and `ros2 bag play`. Without it this host drops ~50 % of 1.37 MB
+  # point clouds at the WRITER: intra-host payload goes over shared memory and the
+  # default SHM segment cannot hold that sample stream, so the writer discards
+  # rather than waits (kernel UDP counters stay at zero throughout). 929/929 clouds
+  # with the profile, 331/929 without. See config/dds/fastdds_shm_big.xml.
+  dds_profile: ${SDP_DDS_PROFILE:-${SDP_REPO}/config/dds/fastdds_shm_big.xml}
+  # Optional belt-and-braces for the same problem, passed to `ros2 bag play
+  # --qos-profile-overrides-path`: keep_all makes the player block instead of
+  # overwrite un-acked samples. Not needed once the profile above is in place.
+  play_qos_overrides: ${SDP_PLAY_QOS:-${SDP_REPO}/config/dds/qos_lidar.yaml}
+
+# Interpreter for the offline analysis scripts (numpy + rosbags, no ROS). Separate
+# from ros.python because the ROS python has no `rosbags` and anaconda's has no rclpy.
+analysis_python: ${SDP_ANALYSIS_PYTHON:-${HOME}/anaconda3/bin/python3}
+
+fastlio:
+  # FAST-LIO writes its debug logs to a path baked in at compile time (CMakeLists
+  # sets -DROOT_DIR=<source dir>/), so they always land in the source tree and every
+  # run overwrites the previous one's. batch_fastlio.py copies them out per bag.
+  log_dir: ${SDP_FASTLIO_LOG:-${HOME}/prj/fast_lio_ws/src/FAST_LIO_ROS2/Log}
+  rviz_config: ${SDP_FASTLIO_RVIZ:-${HOME}/prj/FAST_LIO_ROS2/rviz/fastlio.rviz}
+
+datasets:
+  conpr:
+    root: ${SDP_CONPR_ROOT:-/media/${USER}/seagate-2tb/datasets/ConPR}
+  conslam:
+    root: ${SDP_CONSLAM_ROOT:-/media/${USER}/seagate-2tb/datasets/ConSLAM}
+  hilti_2023:
+    # Converted LiDAR+IMU bags, one directory per sequence (<seq>_fastlio_bag),
+    # each holding its own maps/, fastlio_log/, ros_logs/ and runs/<name>/.
+    root: ${SDP_HILTI_ROOT:-${HOME}/prj/dataset/hilti_2023}
+    # The original ROS 1 release: raw bags plus the challenge's calibration files.
+    raw: ${SDP_HILTI_RAW:-/media/${USER}/seagate-2tb/datasets/hilti_2023}
+    # `<seq>.txt` (surveyed control points) and `<seq>_lidar.txt` (the prism in the
+    # LiDAR frame, robot sequences only) -- the only ground truth this dataset has.
+    groundtruth: ${SDP_HILTI_GT:-${datasets.hilti_2023.raw}/hilti-slam-challenge-2023/groundtruth_2023}
+    # .kdm maps built from each sequence's own FAST-LIO cloud.
+    kdm: ${SDP_HILTI_KDM:-${datasets.hilti_2023.root}/maps/kdm}
+    # Evaluation artefacts: align_*.json, cfg_*/params_* for the localizer, the
+    # monitor CSVs, fl_*/loc_*.json and the report build. Outside the repo because
+    # it is generated data, not source.
+    results: ${SDP_HILTI_RESULTS:-${HOME}/kd_localizer_docker/results/hilti_2023_site2}
+
+# The Humble release container that runs kd_localizer / build_map on this Jazzy
+# host. scripts/hilti/*.sh run INSIDE it; the drivers below compose the
+# `docker compose run` command from these values.
+localizer_container:
+  compose_dir: ${KD_LOCALIZER_DOCKER:-${HOME}/kd_localizer_docker}
+  # Where compose mounts this checkout, so the in-container scripts have a fixed path.
+  repo_mount: ${SDP_REPO_MOUNT:-/opt/sdp}
+  # Where compose mounts the dataset's results dir (the scripts' work directory).
+  work_mount: ${SDP_WORK_MOUNT:-/work}

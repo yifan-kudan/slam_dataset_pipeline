@@ -1,0 +1,98 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">04</span> &nbsp;odometry and maps</p></div>
+  <h2>All fifteen on all of their data — and a second cause of loss</h2>
+  <div class="col">
+    <p>
+      The shared-memory profile alone did not get there. On the first attempt the twelve
+      handheld sequences came in at 99.6&ndash;99.9&nbsp;% and <em>all three robot
+      sequences failed the gate</em>: <code>site2_robot_1</code> at 41.5&nbsp;%,
+      <code>robot_3</code> at 71.2&nbsp;%, <code>robot_2</code> at 80.4&nbsp;%. Two
+      measurements say that was not the transport:
+    </p>
+    <ul>
+      <li>
+        Per-frame LIO cost was 7.3&nbsp;ms on the robot against 4.2&nbsp;ms on the
+        handheld rig — nowhere near the 100&nbsp;ms budget, so it was not compute.
+      </li>
+      <li>
+        Binned over the run, <code>robot_1</code> went
+        99.8 / 100 / 100 / 100 / 100 / 99.1 / <b>43.3 / 23.9 / 21.4 / 19.2</b>&nbsp;% by
+        decile. Transport loss is flat in time. This ramps. And <code>robot_2</code>'s log
+        spans only 247&nbsp;s of a 306&nbsp;s bag — the run was <em>truncated</em>, not
+        thinned.
+      </li>
+    </ul>
+    <p>
+      <code>publish_map()</code> does two jobs. It appends the current scan to
+      <code>pcl_wait_pub</code>, which is the cloud <code>/map_save</code> writes, and then
+      it publishes <em>the whole accumulated cloud</em> on <code>/Laser_map</code>. So its
+      cost grows with the square of the run length. <code>site2_robot_1</code> accumulates
+      28.2&nbsp;M points, so at <code>map_period_ms: 370</code> its last messages are
+      ~900&nbsp;MB each, every 370&nbsp;ms. That starves the node's own callback thread,
+      the reader stops draining the shared-memory port, and the best-effort cloud writer
+      drops — which is why the loss tracks the cloud rather than the clock. The handheld
+      rig survived only because its clouds are sparser: 7.4&nbsp;M points against
+      28.2&nbsp;M, since <code>blind</code> is 1.0&nbsp;m rather than the robot's 0.5 and
+      the Bpearl is a short-range hemisphere whose near field is dense.
+    </p>
+  </div>
+
+<pre><code><span class="cmt">laserMapping.cpp, publish_map() -- a new parameter, default true = upstream</span>
+    *pcl_wait_pub += *laserCloudWorld;      <span class="cmt">what /map_save writes: always</span>
+<span class="add">+   if (!map_publish_en) return;            // the rest is for RViz only</span>
+    pcl::toROSMsg(*pcl_wait_pub, laserCloudmsg);
+    pubLaserCloudMap-&gt;publish(laserCloudmsg);</code></pre>
+
+  <div class="col">
+    <p>
+      The saved cloud is unchanged — the accumulation is untouched — and nothing subscribes
+      to <code>/Laser_map</code> in a headless batch run. With
+      <code>publish.map_publish_en: false</code> in both Hilti configs and everything else
+      identical, all fifteen re-ran at <b>99.6&ndash;100.0&nbsp;%</b>, robot_1 going from
+      41.5&nbsp;% to 100.0&nbsp;%.
+    </p>
+  </div>
+
+  <div class="note">
+    <p class="eyebrow">A frame count is not a health check</p>
+    <p>
+      <code>site1_handheld_4</code> hit <b>99.8&nbsp;%</b> of its frames on the first
+      attempt and still diverged outright — max&nbsp;|v| 273&nbsp;m/s, a bounding box of
+      2463&nbsp;&times;&nbsp;1387&nbsp;&times;&nbsp;2457&nbsp;m for a building 38&nbsp;m
+      across. With the publish disabled the same bag gives 2.05&nbsp;m/s and
+      38&nbsp;&times;&nbsp;50&nbsp;&times;&nbsp;6&nbsp;m. So the stall did not only drop
+      clouds, it broke a run whose frame accounting was clean: the surviving frames arrive
+      in bursts, and the estimate is not indifferent to that. The three divergence
+      detectors in the table below — <code>max |v|</code>, peak accelerometer bias, worst
+      9&nbsp;s displacement — are what caught it, and they are the reason they exist.
+    </p>
+  </div>
+
+  {{fig_frames}}
+  {{tbl_fastlio}}
+
+  <h3>Where the odometry stands</h3>
+  <div class="col">
+    <p>
+      Eleven of the fifteen land between <b>1.7 and 16.2&nbsp;cm</b> of mean control-point
+      error, and the well-sampled ones are in that group:
+      <code>site3_handheld_3</code> at 3.8&nbsp;cm over 28 pairs,
+      <code>site2_robot_1</code> at 16.2&nbsp;cm over 21,
+      <code>site3_handheld_2</code> at 5.2&nbsp;cm over 15. That matters more than the
+      headline figure, because a one-pair score is a single measurement — and this dataset
+      has one-pair sequences whose scatter across runs of the same configuration is wider
+      than the difference any of these fixes made.
+    </p>
+    <p>
+      Four do not. <code>site1_handheld_5</code> at 27.5&nbsp;cm and site2's three handheld
+      walks at 59.3, 61.6 and 1295.3&nbsp;cm are the sequences that cross building levels,
+      and they fail the way this dataset has always failed: the vertical component is
+      under-read by roughly a tenth per level, which survives every fix here.
+      <code>site2_handheld_5</code> is a different problem again — a ~37&nbsp;m fold in the
+      stairwell, which it has now produced at 50&nbsp;%, 99.8&nbsp;% and 99.8&nbsp;% frames
+      and at both playback rates alike (12.85, 12.89, 12.95 and 12.97&nbsp;m mean pair
+      error). Its map is built and reported anyway, because it turns the localizer section
+      below into a test of what happens in a <em>bad</em> map — which is worth having.
+    </p>
+  </div>
+</section>

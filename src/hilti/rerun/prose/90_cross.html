@@ -1,0 +1,94 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">09</span> &nbsp;the result</p></div>
+  <h2>The prior holds. The track does not.</h2>
+  <div class="col">
+    <p>
+      Twelve cross-sequence runs, two configurations each, and none of them completes its
+      bag. The longest is <code>site3_handheld_4</code> in site3's hub map at 71.6&nbsp;s of
+      106; the rest end between 4.8 and 38.5&nbsp;s. This is a negative result, so the
+      question worth answering is <em>which</em> part fails — and it is not the part this
+      report set out to build.
+    </p>
+  </div>
+
+  {{tbl_cross2}}
+
+  <h3>Three things that are working</h3>
+  <div class="col">
+    <ul>
+      <li>
+        <b>The registration.</b> Nine of twelve priors place the start pose within 6&nbsp;cm
+        and 1&deg; of a re-fit restricted to the sequence's own neighbourhood, at overlaps of
+        0.37&ndash;0.75. ConSLAM tracked full bags cross-sequence on 0.46&ndash;0.66 with the
+        same release, so these are not marginal alignments.
+      </li>
+      <li>
+        <b>The pose, while it lasts.</b> On the two best site2 pairs the estimate sits
+        <b>23 and 30&nbsp;cm</b> from the sequence's own FAST-LIO trajectory in the hub's
+        frame, with 80&nbsp;% of the tracked span inside a metre and inlier ratios of
+        0.55&ndash;0.67. The localizer is genuinely localized in another visit's map. It
+        just cannot stay that way.
+      </li>
+      <li>
+        <b>The gravity prior, once corrected.</b> Section 07's knob matters most here:
+        <code>site2_handheld_4</code> in the robot map went from <b>16.44&nbsp;m</b> off the
+        registered reference to <b>0.225&nbsp;m</b>, and from an inlier ratio of 0.096 to
+        0.628, on that one value. The 0.3&nbsp;rad it had been carrying was written for
+        un-levelled map frames and is 17&deg; of freedom the filter spends explaining the
+        10&ndash;20&nbsp;cm disagreement a different visit legitimately shows.
+      </li>
+    </ul>
+  </div>
+
+  <h3>What is not working</h3>
+  <div class="col">
+    <p>
+      The covariance grows without bound and the run is cut — at 200 in configuration A, at
+      2000 in configuration B, and the earlier own-map experiment showed that removing the
+      limit lets genuine divergence run for hundreds of metres rather than rescuing
+      anything. Five runs never get that far and die on <code>Motion predictor update
+      failed</code>. Every pair was attempted three times and the outcome reproduces to
+      within a few seconds, so this is not the intermittent startup fragility ConSLAM
+      documented; it is the same wall every time.
+    </p>
+    <p>
+      Two contributing conditions are measurable and neither is sufficient on its own.
+      <b>Route coverage</b> — the overlap in a 15&nbsp;m ball around each pose along the
+      walk — drops below 0.5 for 16&nbsp;% to 83&nbsp;% of the route on five of the twelve
+      pairs, against ConSLAM's 8&nbsp;% worst case. Site&nbsp;3's figure shows it directly:
+      the registered routes leave the hub map's footprint. But
+      <code>site2_handheld_4</code> has a route-coverage minimum of 0.73 and fails anyway,
+      so thin coverage is not the whole explanation.
+    </p>
+  </div>
+
+  {{fig_sites}}
+  {{fig_cross}}
+
+  <div class="note">
+    <p class="eyebrow">What separates this from ConSLAM</p>
+    <p>
+      The same release, the same method and a comparable prior tracked all of ConSLAM's
+      cross-sequence bags end to end at 11&nbsp;cm median. The differences that remain
+      unexplored here are the ones this dataset adds: indoor multi-level geometry with
+      self-similar stairwells and bays, a 400&nbsp;Hz rig whose map frames sit ~180&deg;
+      from gravity before levelling, and routes that share a building without sharing a
+      path. Which of those matters is the next question, and this run does not answer it.
+    </p>
+  </div>
+
+  <h3>What the run does establish</h3>
+  <div class="col">
+    <p>
+      Every stage before the cross-sequence localizer is now sound and reproducible.
+      Fifteen sequences at 99.6&ndash;99.9&nbsp;% of their clouds, with three independent
+      input-fidelity bugs found and fixed; eleven of fifteen odometry runs inside
+      16&nbsp;cm of the survey; fifteen levelled maps; own-map localization agreeing with
+      its own odometry to <b>0.8&ndash;2.7&nbsp;cm</b> on all fifteen and running seven full
+      bags without a single LOST. Against that, cross-sequence reuse on this dataset is
+      currently blocked in kd_localizer's covariance behaviour rather than in the map, the
+      registration or the pipeline — which is a smaller and much better-posed problem than
+      the one this campaign started with.
+    </p>
+  </div>
+</section>

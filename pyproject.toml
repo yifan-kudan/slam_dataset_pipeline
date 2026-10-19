@@ -1,0 +1,64 @@
+# The pipeline is *run* as scripts (`python3 src/to_bag.py ...`), not imported as an
+# installed package. The [project] table below is here to declare dependencies in one
+# machine-readable place -- `pip install .` (or `pip install -e .`) sets up an
+# environment; it does not change how the scripts are invoked.
+
+[project]
+name = "slam-dataset-pipeline"
+version = "0.1.0"
+description = "Convert SLAM datasets into ROS 2 bags and run FAST-LIO over them"
+requires-python = ">=3.10"
+
+# Both converters and the evaluation run on these three alone -- no ROS environment.
+dependencies = [
+    "numpy>=1.21",
+    "PyYAML>=5.4",
+    "rosbags>=0.9.16",   # ROS 1 reader + ROS 2 writer, typestore, sqlite3/mcap plugins
+]
+
+[project.optional-dependencies]
+# Resource logging degrades gracefully: without psutil there is no sampling, without
+# matplotlib no chart, and the conversion itself is unaffected either way.
+resource-log = ["psutil>=5.8", "matplotlib>=3.5"]
+
+# `pcd_convert.py --format las` only. PLY output stays on numpy alone, so laspy is
+# an extra rather than a dependency, and pcd_io imports it on demand.
+las = ["laspy>=2.0"]
+# LAZ additionally needs a compression backend; laspy imports fine without one and
+# would otherwise fail on the first file written rather than at startup.
+laz = ["laspy>=2.0", "lazrs>=0.5"]
+# src/kdloc/evaluate.py's accuracy figures. 1.38 is the version checked for the
+# interpolation sync (`SyncMethod.interpolation`) the evaluator relies on.
+kdloc = ["evo>=1.38"]
+dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.0", "laspy>=2.0", "evo>=1.38"]
+
+# src/ is a flat script directory, so there is nothing for a build backend to package.
+# Declared explicitly to keep `pip install .` from guessing (and failing) on layout.
+[tool.setuptools]
+py-modules = []
+
+[tool.ruff]
+line-length = 110          # the existing code sits at <= 105
+target-version = "py310"
+src = ["src"]
+
+[tool.ruff.lint]
+# Kept to the rules the tree can actually satisfy today, so `ruff check` staying
+# green is a meaningful signal. Formatting is deliberately NOT enforced yet:
+# `ruff format` would rewrite every file and bury real changes in reflow noise.
+select = ["E", "F", "W", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+mypy_path = "src"
+ignore_missing_imports = true   # rosbags / numpy stubs are not installed here
+
+[tool.pytest.ini_options]
+# src/ is a flat script directory (modules import each other by bare name), so put
+# it on the path rather than making the tests manipulate sys.path.
+pythonpath = ["src"]
+testpaths = ["tests"]
+# A ROS-sourced shell puts /opt/ros/<distro> on PYTHONPATH, and its launch_testing
+# pytest plugins then fail to import (missing `lark`) or register hooks this pytest
+# does not know, aborting collection before any test runs. Nothing here needs them.
+addopts = "-p no:launch_testing -p no:launch_ros"

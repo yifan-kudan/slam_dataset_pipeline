@@ -1,0 +1,68 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">06</span> &nbsp;localization in its own map</p></div>
+  <h2>Where it tracks, it tracks to a centimetre. Seven of fifteen reach the end.</h2>
+  <div class="col">
+    <p>
+      Each bag replayed against a <code>.kdm</code> built from its own FAST-LIO cloud —
+      the easy case, and the floor for everything after it. The map holds exactly the
+      geometry the bag is about to see, and the map frame <em>is</em> the rig's start pose,
+      so <code>initial_pose</code> is the gravity levelling and nothing else.
+    </p>
+    <p>
+      The accuracy result is unambiguous. Against the sequence's own FAST-LIO trajectory,
+      in the frame they share, the median disagreement is <b>0.8 to 2.7&nbsp;cm on every
+      one of the fifteen</b> — including the ones that are later declared lost, and
+      including <code>site2_handheld_5</code>, whose map contains a 37&nbsp;m fold. On the
+      surveyed control points, every sequence that reaches two of them scores
+      <b>1.9 to 16.3&nbsp;cm</b>, which is the same band as the odometry that built the map
+      and in four cases slightly better than it.
+    </p>
+    <p>
+      Tracking is the part that splits. All three robot sequences and all four of site3's
+      handheld sequences run their full bag with zero LOST — 698.6&nbsp;s of 700 on
+      <code>site2_robot_1</code>, at a covariance factor peaking at 36.9 against a limit of
+      200. Every site1 sequence and every site2 handheld sequence is declared lost partway,
+      always on the same reason: <code>Pose covariance is too high (Rotation X/Y/Z)</code>.
+    </p>
+  </div>
+
+  {{tbl_own}}
+  {{fig_health}}
+
+  <h3>What the losing frame actually looks like</h3>
+  <div class="col">
+    <p>
+      The reason string names a rotation covariance, so the obvious reading is that the
+      attitude estimate diverged. The rows around each loss say otherwise — the absolute
+      covariances there are small, and on one sequence every ray agrees with the map:
+    </p>
+  </div>
+
+<pre><code><span class="cmt">the losing frame, from the monitor CSV</span>
+                     reason              inlier   sig_rot     as deg    sig_pos
+site1_handheld_2     Rotation Y           0.181   0.00234    0.13 deg    1.5 cm
+site1_handheld_1     Rotation X           0.242   0.01426    0.82 deg    2.3 cm
+site1_handheld_5     Rotation X           0.224   0.01806    1.03 deg    2.3 cm
+site2_handheld_4     Rotation Z         <span class="add">  1.000</span>   0.03569    2.04 deg    3.9 cm</code></pre>
+
+  <div class="col">
+    <p>
+      <code>site2_handheld_4</code> is the clear case: a <b>ray inlier ratio of
+      1.000</b> — every ray consistent with the map — and 2.0&deg; of rotation
+      uncertainty, declared lost. What the gate thresholds is not the covariance but
+      <code>max_pose_sigma_factor_increase</code>, the <em>ratio</em> of the current sigma
+      to the run's own best. A filter that starts very confident earns a large ratio from a
+      small absolute rise, so the threshold means different things on different sequences.
+      At the losing frame the ratio had reached 254&ndash;380 against the limit of 200.
+    </p>
+    <p>
+      The four short runs were each retried three times and reproduced to within a second —
+      <code>site2_handheld_4</code> at 16.8, 17.0 and 17.1&nbsp;s of a 93&nbsp;s bag — so
+      these are not the intermittent startup failure seen on ConSLAM. They are the same
+      event, at the same frame, every time. Section 07's experiment separates the two
+      possible readings of that.
+    </p>
+  </div>
+
+  {{fig_own}}
+</section>

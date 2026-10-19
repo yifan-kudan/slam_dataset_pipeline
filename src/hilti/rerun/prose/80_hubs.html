@@ -1,0 +1,78 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">08</span> &nbsp;one map per site</p></div>
+  <h2>Coverage is a measurement, not the size of the map</h2>
+  <div class="col">
+    <p>
+      Reusing one map across visits is the case that matters on a site: build once, localize
+      on every later walk. Which of a site's sequences should supply that map is a question
+      with an obvious wrong answer — the biggest map — and a measurable right one: the map
+      that explains the most of <em>the other sequences</em>.
+    </p>
+    <p>
+      Those are not the same. Coverage here is the fraction of sequence B's cloud landing
+      within 0.5&nbsp;m of a point of sequence A's, after registering the two, and it is
+      deliberately asymmetric: a small map inside a large one scores high in one direction
+      and low in the other. Every ordered pair inside each site was registered — 20 for
+      site1, 30 for site2, 12 for site3 — and the hub is the row with the highest mean.
+    </p>
+  </div>
+
+  {{fig_matrix}}
+  {{tbl_hubs}}
+
+  <div class="col">
+    <p>
+      Site&nbsp;2 is the case that makes the point. Its hub is
+      <code>site2_robot_1</code>, whose 1&nbsp;m voxel count is <em>fifth</em> of the six —
+      but it explains 0.70 and 0.69 of the two handheld clouds and 0.43&ndash;0.58 of the
+      other robot runs, for a mean of 0.57. <code>site2_handheld_6</code>, second at 0.49,
+      would also have been defensible. Ranking by map size instead would have picked
+      <code>site1_handheld_1</code> at site&nbsp;1 (which the coverage measure also picks,
+      at 0.47) but the wrong map at site&nbsp;2.
+    </p>
+    <p>
+      Two other things the matrix says. The two site2 robot runs explain each other at 0.81
+      and 0.72 — far above anything else in the table — which is what two drives over the
+      same ground should look like and a useful sanity check on the registration itself.
+      And site1's numbers are the weakest of the three sites, 0.14 to 0.68, because its
+      sequences overlap each other least: the walks share a building but not a route.
+    </p>
+  </div>
+
+  <h3>The prior, and how far to trust it</h3>
+  <div class="col">
+    <p>
+      A hub map and another sequence's bag share no frame — each FAST-LIO map frame is its
+      own rig's IMU pose at its own first scan — so every cross-sequence run needs
+      <code>initial_pose</code> supplied. Levelling both clouds with the rotations
+      <code>align_map.py</code> already measured collapses the search from six degrees of
+      freedom to yaw plus translation, which is what makes this tractable: FFT phase
+      correlation of wall-occupancy grids over a yaw sweep, a z-histogram correlation, then
+      multi-scale trimmed point-to-plane ICP.
+    </p>
+    <p>
+      Overlap alone does not say whether the pose is right <em>where the run starts</em>, so
+      two further checks do. The <b>local check</b> re-fits using only the points within
+      20&nbsp;m of the sequence's own origin: if the global fit had been dragged by the far
+      end of the site, this moves. <b>Route coverage</b> measures the same overlap in a
+      15&nbsp;m ball around each of 200 poses along the sequence's own trajectory, so a map
+      that runs out halfway shows up as a low minimum rather than a decent mean.
+    </p>
+  </div>
+
+  {{tbl_register}}
+
+  <div class="note">
+    <p class="eyebrow">One registration the checks caught</p>
+    <p>
+      <code>site2_robot_2</code> into the robot hub has a perfectly ordinary overlap of 0.47
+      and a local check of <b>221&nbsp;cm and 4.5&deg;</b> — an order of magnitude worse than
+      any other pair. Its route coverage bottoms out at 0.15. The global fit is in the wrong
+      basin near the start, and no overlap number would have told you: 0.47 sits mid-table.
+      Nine of the twelve pairs land within 6&nbsp;cm and 1&deg;, which is what a usable
+      prior looks like.
+    </p>
+  </div>
+
+  {{fig_sites}}
+</section>

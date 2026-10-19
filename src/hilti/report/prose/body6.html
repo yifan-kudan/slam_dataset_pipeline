@@ -1,0 +1,76 @@
+  <section>
+    <h2><span class="ord">10</span> 坑 <em>gotchas</em></h2>
+    <div class="col">
+      <ul>
+        <li><strong>FAST-LIO 地图不能直接喂 kd_localizer</strong>，除非它的地图系恰好近似 +Z 朝上。Hilti 两个平台都不是（88–92° / 177–180°）。建图时摆平，或改重力先验。</li>
+        <li><strong>机器人 IMU 是 x 轴朝上。</strong>把它当 z-up/z-down 会把垂直和水平静默互换 —— 本次一度以为 FAST-LIO 重力估计出错，与原始 IMU 对照后排除。</li>
+        <li><strong>测绘控制点不在地图系里。</strong>survey 的 xyz 与任何一个地图系都没有已知关系，这正是评分口径用<em class="i">成对距离</em>的原因。把 survey 的 xyz 直接画到地图上是错的 —— 本次作图时踩过，图里画的是「估计在控制点时刻的位置」。</li>
+        <li><strong>杆臂要分平台取。</strong>手持棱镜杆臂取录制包 tf_static 的 20 cm；机器人<strong>逐点</strong>取 <code>&lt;seq&gt;_lidar.txt</code>（IMU 系下 0.77 m）。用错杆臂会凭空造出约 1.5 m 误差。位姿在控制点时刻插值（位置线性 + 姿态 slerp），不取最近邻 —— 丢帧后最近邻可差 117 ms，即 16 cm。</li>
+        <li><strong>控制点少的序列不能当精度结论。</strong>本报告有 3 条序列在跟踪窗口内不足 2 个控制点，只报「有没有坏」。</li>
+        <li><strong>健康门限不覆盖跨层误差。</strong><code>handheld_4</code>、<code>handheld_6</code>（r0.3）与 <code>robot_1</code> 的 max|v|、|ba|、最差 9 s 位移全绿，跨层控制点分别错 1.71 / 1.42 / 1.02 m。</li>
+        <li><strong>监控 CSV 里一半的行是非帧刻度。</strong>状态 20 Hz、点云 10 Hz，非帧行的内点率与 σ 都写 0；统计前必须按 <code>sigma_factor &gt; 0</code> 过滤，否则中位数被稀释成 0。</li>
+        <li><strong>统计 σ 必须只取 TRACKING 行。</strong>判 Lost 之后节点持续重发冻结值；不过滤会让被判 Lost 的序列 σ 中位数等于峰值。</li>
+        <li><strong>仓库的 <code>rebag_hilti_fastlio.yaml</code> 丢掉 <code>/tf_static</code></strong> —— 15 个包里 10 个受影响，必须运行时补发 <code>imu_link → velodyne</code>，否则永远 UNINITIALIZED。</li>
+        <li><strong>降低播放速率不是可控手段。</strong>见 <span class="mono">§09</span>：同一个改动在三条序列上给出三种方向。别把它当调参旋钮。</li>
+        <li><strong><code>map</code> 是节点参数，不是 launch 参数</strong> —— <code>map:=...</code> 会被静默忽略，地图路径只从 params 文件读。</li>
+        <li><strong><code>odom → base</code> 查找失败只是外观问题。</strong>这些包没有里程计源，节点会一直警告 <code>Unable to publish map to odometry</code>；不影响跟踪，只影响 TF 与 RViz。</li>
+        <li><strong>运行产物会被后续实验覆盖。</strong>本次发现磁盘上 6 个 <code>run_*.csv</code> 已被「上限 1000 / 2000」的实验覆盖，而对应的评分 JSON 还是交付配置的 —— 图与表会因此不一致。已重跑并把实验产物改名为 <code>*_lim1000.csv</code> / <code>*_experiment.csv</code>。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="ord">11</span> 产出与工具 <em>artefacts</em></h2>
+    <div class="col">
+      <p>
+        工具与配置全部在 <code>slam_dataset_pipeline</code> 项目里：
+        评分与作图在 <code>src/hilti/</code>，容器内脚本在 <code>scripts/hilti/</code>，
+        标定与「每条序列用哪次运行」在 <code>config/hilti/{platforms,sequences}.yaml</code>，
+        而所有绝对路径只出现在 <code>config/paths.yaml</code> 一处
+        （<code>python3 src/paths.py</code> 打印解析结果）。
+        运行产物在 <code>datasets.hilti_2023.results</code>，
+        包与地图在 <code>datasets.hilti_2023.root</code>，
+        原始 ROS 1 包在 <code>datasets.hilti_2023.raw</code>。
+      </p>
+      <ul>
+        <li><code>gcp.py</code> — 控制点成对距离评分（插值在这里；杆臂与逐平台差异已抽到 <code>config/hilti/platforms.yaml</code>）。</li>
+        <li><code>eval_fastlio.py</code> / <code>eval_localizer.py</code> — 两个系统的评分器，共用 <code>gcp.py</code>。已用 <code>site2_robot_2</code> 回归到与上一份报告逐项一致。</li>
+        <li><code>align_map.py</code> — 测量地图系重力倾角，输出 <code>R_align</code>、PDAL 矩阵与 <code>initial_pose.rotation</code>，并对欧拉往返与摆平结果做断言。</li>
+        <li><code>diag_gcp.py</code> — 沿估计重力把点对误差分解成垂直/水平。</li>
+        <li><code>monitor_pose.py</code>、<code>gen_cfg.py</code>、<code>scripts/hilti/build_maps.sh</code>、<code>scripts/hilti/run_seq.sh</code> — 位姿监控、逐序列配置、PCD→LAS→<code>.kdm</code>、容器内单次运行（后两个由 <code>scripts/hilti/in_container.sh</code> 带着挂载启动）。</li>
+        <li><code>scripts/mapping/map_dump.cpp</code> — 把 <code>.kdm</code> 的平面体素导成 CSV，本报告 14 张地图图都由它产出（release 的 <code>build_map</code> 是 Polyscope GUI，无头环境画不了图）。</li>
+      </ul>
+      <p>
+        本报告自己的产出链在 <code>src/hilti/report/</code>，一条命令重建：
+      </p>
+      <pre>./src/hilti/report/build.sh   # prep → 图 → 表 → PNG 量化 → 拼装 → 复核，按依赖顺序</pre>
+      <p>
+        <code>prep.py</code> 把 15 条序列的轨迹、诊断、控制点分解收进一个
+        <code>data.json</code> + <code>traj.npz</code>；作图与建表都只读它，
+        所以报告里没有一个手打的数字。
+      </p>
+    </div>
+
+    <div class="note warnbox">
+      <p class="hd">本次仍未产出</p>
+      <p>
+        <code>*_kdamr_cam_bag</code>（含相机的整包归档）没有生成。
+        相机流约占这些录制的 90%，本次评估无任何环节消费；生成它们需要读写各约 146 GB 的机械盘时间。
+        原始包现已在本地，需要时每条一条命令即可补：
+      </p>
+      <pre>python3 src/rosbag1_to_ros2.py &lt;raw&gt;.bag -o &lt;seq&gt;_kdamr_cam_bag \
+  -c config/hilti/bag_hilti{,_robot}_kdamr.yaml --groups all</pre>
+      <p>
+        另一项未解：<code>site2_handheld_6</code> 在上限 2000 下为什么会让位置协方差涨到中位数的 500 倍，
+        本次没有查清，作为未解项记录。
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <p>Hilti SLAM Challenge 2023 · site1 / site2 / site3 共 15 条序列 · FAST-LIO2 <span class="mono">-r 0.3</span>（<code>site2_handheld_6</code> 为 <span class="mono">-r 0.15</span>）· kd-localizer-v1.1.0-ros-humble-amd（Humble 容器，Jazzy / 24.04 宿主）</p>
+    <p>图中调色板取自 data-viz 参考调色板的 1–3 号槽位（kd_localizer 蓝、FAST-LIO 橙、测绘绿），未改动数值；地图底图用中性灰阶，以免与两条轨迹争色。栅格图按浅色渲染，因此在深色主题下仍显示为浅色卡片。</p>
+    <p>上游报告：<code>slam_dataset_pipeline/docs/hilti_2023_report.md</code>（转换与 FAST-LIO 口径）与 ConSLAM kd_localizer 评估（定位口径）。本报告取代此前只覆盖 site2 五条、且无图的那一版。</p>
+  </footer>
+
+</div>

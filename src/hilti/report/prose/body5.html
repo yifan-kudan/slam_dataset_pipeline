@@ -1,0 +1,214 @@
+  <section>
+    <h2><span class="ord">08</span> 三次具体事故 <em>incidents</em></h2>
+    <div class="col">
+      <p class="lede">
+        三条序列各自坏在不同的地方，而且是三种不同的坏法：一次离散事故、一次彻底发散、一次误报。
+        分开看它们比合起来算平均值有用得多。
+      </p>
+      <h3>一 · site2_robot_1：里程计在 2.2 秒里凭空爬了 3.3 m，定位器没跟</h3>
+      <p>
+        机器人平台的水平解<strong>极准</strong> —— 50 m 基线上 8 cm、28 m 上 2.6 cm ——
+        误差几乎全在高度。逐层累积约 12–14%（第 2 层 0.38 m、第 3 层 0.67 m），
+        然后出现一次离散事故：
+      </p>
+      <pre>t+629.8s  持续 5 s 内最快爬升 +0.668 m/s
+t+632.4s  dh = +0.863 m  在 dt = 0.80 s 内   |v| = 0.80
+t+633.2s  dh = +1.812 m  在 dt = 1.10 s 内   |v| = 1.63
+t+634.3s  dh = +0.615 m  在 dt = 0.30 s 内   |v| = 2.25
+          —— 合计 +3.29 m / 2.2 s，此后 65 s 高度平坦不再恢复</pre>
+      <p>
+        t+529 s 时高度还是<em class="i">准的</em>（估计 −5.45 m，测绘 −5.468 m）。
+        两次连续的 LiDAR 中断（0.80 s 与 1.10 s）期间滤波器靠 IMU 递推，
+        把加速度计零偏积成了 3 m 高度差。期间 |v| 峰值只有 2.25 m/s、最差 9 s 位移 10.4 m ——
+        <strong>两个健康门限都没碰到</strong>。
+      </p>
+    </div>
+
+    <figure>
+      <div class="figmat"><!--FIG:fig_incident--></div>
+      <figcaption>
+        <b>图 7 · 定位器留在了真实楼面上</b>
+        上：沿重力的高度，两条轨迹与测绘控制点，全部按 cp0 归零。
+        橙色（FAST-LIO）在 t+632 s 竖直跳起约 2.7 m 并停在那里；蓝色（kd_localizer）没有跟。
+        下：两者逐帧之差 —— t+600 s 前一路 <strong>22.7 mm 中位</strong>，
+        <strong>t+634.0 s</strong> 首次超过 1 m，与上面那次事故对到一帧之内。
+        分歧的方向是关键：垂直分量中位 <strong>−2.564 m</strong>，即定位器<em class="i">低于</em>里程计，
+        而里程计那次是虚假<em class="i">爬升</em>。
+      </figcaption>
+    </figure>
+
+    <div class="col">
+      <p>
+        为什么用一张含错轨迹建的地图，反而能定位得比那条轨迹更准？
+        因为<strong>只有最后 65 s 的点云被抬高了</strong>，地图底层仍由更早的正确通过主导，
+        定位器匹配上了正确的几何。测绘数据独立印证：kd 20.6 / 81.0 cm 对 FAST-LIO 28.9 / 102.3 cm，
+        cp6 相关的垂直误差从 2.83–3.50 m 降到 0.28–0.94 m。
+      </p>
+      <p>
+        但残余误差有明确形状：跨层点对的垂直分量系统性少读 0.3–0.7 m，
+        同层点对依旧极准（2-4 对：49.910 → 49.827 m）。这是地图从 FAST-LIO 继承来的垂直压缩 ——
+        <strong>定位器不可能比给它的几何更准</strong>。
+      </p>
+
+      <h3>二 · site2_handheld_5：发散有明确起点，不可恢复</h3>
+      <p>
+        前 113 s 正常（每 20 s 位移 9.75 / 4.12 / 3.69 / 0.01 / 4.77 m，其中 t+60–80 s 是静止段），
+        <strong>t+113.4 s 首次冲破 3 m/s</strong>，t+124 s 过 10 m/s，随后单调升级、全程不再恢复。
+        对照控制点的高度，t+113 s 正落在一段约 2.75 m 的爬楼里。
+        起点前 10 s 有 17 次 &gt;0.3 s 的采样间隔（最大 0.7 s），全程 52 次 &gt;0.5 s。
+      </p>
+      <p>
+        它的帧率 52.9% 与跑通的序列同区间，机器也是空载。<strong>变的是几何，不是负载。</strong>
+      </p>
+    </div>
+
+    <figure>
+      <div class="figmat"><!--FIG:fig_divergence--></div>
+      <figcaption>
+        <b>图 8 · 唯一一条连地图都建不出来的序列</b>
+        上：速度（对数）—— 前 113 s 是正常的走走停停（0.01–2 m/s），
+        然后单调升到 <strong>249 m/s</strong>。下：离起点的距离（对数）——
+        前 113 s 一直在 20 m 以内，即工地本身的尺度，最后停在 <strong>9 259 m</strong> 外。
+        这里画的是距离而不是带符号的高度：这次运行的重力状态本身已经不可信，
+        「沿重力的高度」连正负都不可靠，而离起点多远是与朝向无关的量。
+      </figcaption>
+    </figure>
+
+    <div class="col">
+      <h3>三 · site2_handheld_6：一次<em class="i">确证</em>的误报</h3>
+      <p>
+        这是本次相对上一份报告唯一实质更新的判断。用从 <code>-r 0.15</code> 云重建的那张<em class="i">有效</em>地图，
+        以交付配置重跑：t+43.1 s 判 <code>Pose covariance is too high (Rotation Y)</code>，
+        Lost 时刻内点率 <strong>0.98</strong>。
+      </p>
+      <p>
+        上一份报告到此为止，只能说「内点率看起来健康」。这次加了一条独立证据：
+        <strong>被判 Lost 之前的整个跟踪段，它与那张地图对应的 FAST-LIO 轨迹一致到 16 mm 中位、
+        152 mm 最大、0% 超过 1 m</strong>。也就是说位姿不只是「看起来健康」，
+        而是与参考轨迹逐帧吻合到厘米级。<strong>那次 Lost 是误报</strong>，
+        <code>max_pose_sigma_factor_increase: 200</code> 对手持平台偏紧。
+      </p>
+      <p>
+        但这不能推出「把上限抬高就好」：抬到 2000 之后它并没有跑通，
+        而是在 t+56.5 s 让协方差涨到中位数的 500 倍（峰值 1774，中位 3.5）才失败 ——
+        <strong>那是真发散</strong>。多买到 13 秒，代价是失去一个有用的检测器。
+      </p>
+    </div>
+
+    <div class="note warnbox">
+      <p class="hd">重跑的可复现性</p>
+      <p>
+        本次为了让图与表出自同一次运行，重跑了 site1 五条与 <code>site2_handheld_6</code>
+        （磁盘上那几个 CSV 早先被「上限 1000 / 2000」的实验覆盖过）。
+        重跑结果与上一份报告逐条吻合到秒级：
+        <code>handheld_1</code> 140.1 对 139.6 s、<code>handheld_2</code> 135.2 对 134.7 s、
+        <code>handheld_3</code> 138.5 对 138.4 s、<code>handheld_4</code> 264.7 对 260.9 s、
+        <code>handheld_6</code> 43.1 对 43.2 s，判 Lost 的原因也一致。
+        唯一实质变化的数字是 <code>handheld_2</code> 的控制点误差：这次多跟了 0.5 s，
+        把第三个控制点带进了窗口，点对从 3 对变成 6 对，误差因此从 1.1 cm 变成 1.9 cm ——
+        换了一批点，不是变差了。
+        <strong>判 Lost 的具体轴会变</strong>（<code>handheld_6</code> 这次是 Rotation Y，上次是 Rotation X），
+        Lost 时刻的内点率也从 0.94 变成 0.98 —— 这是已记录的运行间抖动，不影响结论。
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="ord">09</span> 上限、速率与可复现性 <em>reproducibility</em></h2>
+    <div class="col">
+      <p class="lede">
+        本数据集最重要的一条方法论：<strong>系统性误差可复现，离散事故不可复现</strong>，
+        而降低播放速率不是可控的手段。
+      </p>
+      <h3>抬高协方差上限只是把墙往后挪</h3>
+      <p>
+        site1 五条都以 <code>Pose covariance is too high</code> 判 Lost，而 σ 中位数只有 1.8–4.0 ——
+        看起来像误报。把上限从 200 抬到 1000 再跑一遍，结论是<strong>否</strong>。
+        （下表「上限 200」一列是本次重跑的结果，「上限 1000」一列取自磁盘上保留的那批实验运行，
+        两者都从各自的 CSV 重新算过。）
+      </p>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <caption>
+          协方差上限 200 → 1000。σ 峰值随上限一起涨到 921–979，即协方差是<em class="i">真的</em>在跑飞；
+          上限只决定什么时候发现。换来的只有 1–34 s（覆盖率 85–90%），
+          而 <code>handheld_5</code> 反而<em class="i">少</em>跟了 34 s ——
+          它在上限 1000 下撞上了间歇性 ESKF 启动失败。
+        </caption>
+        <thead>
+          <tr><th class="seq">序列</th><th>上限 200</th><th>上限 1000</th><th>时长</th>
+              <th>增量</th><th>σ 峰值</th><th class="l">判 Lost 原因</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="seq">site1_handheld_1</td><td>140.1</td><td>174.4</td><td>204.7</td><td class="ok">+34.3</td><td class="hi">972.6</td><td class="l">Motion predictor update failed</td></tr>
+          <tr><td class="seq">site1_handheld_2</td><td>135.2</td><td>145.4</td><td>167.2</td><td>+10.2</td><td class="hi">949.3</td><td class="l">Rotation Y 协方差</td></tr>
+          <tr><td class="seq">site1_handheld_3</td><td>138.5</td><td>144.6</td><td>170.7</td><td>+6.1</td><td class="hi">979.2</td><td class="l">Rotation Z 协方差</td></tr>
+          <tr><td class="seq">site1_handheld_4</td><td>264.7</td><td>266.0</td><td>295.5</td><td>+1.3</td><td class="hi">920.9</td><td class="l">Position Z 协方差</td></tr>
+          <tr><td class="seq">site1_handheld_5</td><td>56.9</td><td class="hi">22.8</td><td>159.3</td><td class="hi">−34.1</td><td>56.3</td><td class="l">Motion predictor（间歇性启动失败）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="col">
+      <p>
+        <code>site1_handheld_1</code> 在上限 1000 下跑到 <strong>t+175.3 s</strong> 才失败 ——
+        正落在 FAST-LIO 那条序列出 10.5° 偏航的 <strong>t≈167–186 s 无照明封闭楼梯井</strong>里。
+        两个系统在同一处几何退化上失败。
+        <code>site1_handheld_5</code> 爬三层，两种配置下都最差，且撞上了 ConSLAM 记录过的间歇性 ESKF 启动失败 ——
+        所以它在上限 1000 下反而只跟了 22.8 s（14%）。这也说明这一组数字本身有运行间抖动，
+        单次跑不能作为结论。
+      </p>
+      <p>
+        所以 <code>max_pose_sigma_factor_increase</code> 大致放在了对的位置。
+        <strong>唯一有据的例外是手持平台偏紧</strong>（<span class="mono">§08</span> 那次确证误报），
+        但把它抬高换不来跟通，只换来十几秒。
+      </p>
+
+      <h3>降低播放速率不是调参旋钮</h3>
+      <p>
+        r0.3 → r0.15 对丢帧率几乎无影响（49.2→50.2、52.5→52.8、52.9→52.0），
+        所以它带来的差异不是「少丢帧」。三条 site2 手持序列上，同一个改动给出了三种方向：
+      </p>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <caption>四次追加运行，每次回答一个具体问题。同一个改动一条更差、一条好了 9 倍、一条从爆炸变成静默错 34 m —— 这是运气，不是机制。</caption>
+        <thead>
+          <tr><th class="seq">运行</th><th class="l">要回答的问题</th><th>帧率</th><th>控制点</th><th class="l">结果</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="seq">robot_1 · r0.3 重复</td>
+              <td class="l">t+632 s 那次 +3.29 m 事故是数据决定的还是随机的？</td>
+              <td>55.0%</td><td class="mid">25.5 / 116.0 cm</td>
+              <td class="l"><strong>随机</strong> —— 事故未复现，最大高度步进仅 −0.415 m，收尾高度误差 0.29 m（首次 2.86 m）</td></tr>
+          <tr><td class="seq">handheld_4 · r0.15</td><td class="l">降速能否救回跨层误差？</td>
+              <td>50.2%</td><td class="hi">204.1 cm</td>
+              <td class="l"><strong>否</strong> —— 比 r0.3 的 170.8 cm 更差</td></tr>
+          <tr><td class="seq">handheld_6 · r0.15</td><td class="l">同上</td>
+              <td>52.8%</td><td class="ok">15.7 cm</td>
+              <td class="l"><strong>好了 9 倍</strong>（r0.3 为 142.3 cm）。本报告 <code>handheld_6</code> 的地图就是用这条轨迹建的</td></tr>
+          <tr><td class="seq">handheld_5 · r0.15</td><td class="l">降速能否阻止彻底发散？</td>
+              <td>52.0%</td><td class="hi">1 285 / 3 447 cm</td>
+              <td class="l"><strong>更糟</strong> —— 不再爆炸（path 119.5 m、max|v| 1.60、最差 9 s 11.4 m，<em class="i">门限全绿</em>），但静默错到 34.5 m</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="col">
+      <h4>handheld_5 在 r0.15 下：偏航把路径折回了原点</h4>
+      <p>
+        误差全部集中在与 cp0 相关的点对上，而 cp1/cp2/cp3 三点<strong>互相一致到 4 cm</strong>
+        （1-3 点距真值 13.829 → 估计 13.868）。估计把 cp0 放在 cp1 水平方向 <strong>0.13 m</strong> 处，
+        而测绘说两点相距 36.7 m —— 同时两点间的<em class="i">垂直</em>差却是对的（+2.381 对 +2.817）。
+        一段 36.7 m 的外出行程被<strong>折回了自身</strong>，对应早期爬升段累积了接近 180° 的偏航误差。
+      </p>
+      <p>
+        <strong>这比 r0.3 的爆炸更危险。</strong>r0.3 用 249 m/s 把自己暴露出来；
+        r0.15 犯同一类错误却让三个健康门限全部通过。
+        门限是发散探测器，按「是不是人在走路」定阈值，结构上就抓不到这种误差。
+      </p>
+    </div>
+  </section>

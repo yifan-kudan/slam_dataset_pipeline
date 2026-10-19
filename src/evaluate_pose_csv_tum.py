@@ -13,17 +13,34 @@ SE(3), and reports translation ATE statistics.
 """
 import argparse
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 
-def align_se3(src: np.ndarray, dst: np.ndarray):
+def align_se3(src: np.ndarray, dst: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Rigid-align two already-corresponding point sets (Kabsch / Umeyama, no scale).
+
+    ``src`` and ``dst`` are both (N, 3) and must already be in *matching order*:
+    ``src[i]`` is the estimate paired with ground truth ``dst[i]`` (that pairing is
+    what ``match_nearest`` produces). Returns the rotation ``r`` (3, 3) and
+    translation ``t`` (3,) minimising the sum of squared distances between matched
+    points, ``sum(|(r @ src[i] + t) - dst[i]|^2)``.
+
+    Rotation only -- no scale factor is estimated, since both trajectories are in
+    metres and a scaled fit would hide a real drift as a plausible-looking one.
+
+    See https://en.wikipedia.org/wiki/Kabsch_algorithm -- centre both clouds, take
+    the SVD of the cross-covariance, and read the rotation off the singular vectors.
+    """
     src_center = src.mean(axis=0)
     dst_center = dst.mean(axis=0)
     x = src - src_center
     y = dst - dst_center
     u, _, vt = np.linalg.svd(x.T @ y / len(src))
     r = vt.T @ u.T
+    # A negative determinant means the SVD picked a reflection rather than a
+    # rotation; flipping the last singular vector gives the best proper rotation.
     if np.linalg.det(r) < 0:
         vt[-1, :] *= -1
         r = vt.T @ u.T
@@ -31,19 +48,28 @@ def align_se3(src: np.ndarray, dst: np.ndarray):
     return r, t
 
 
-def match_nearest(gt_t: np.ndarray, est_t: np.ndarray, max_dt: float):
-    idx = np.searchsorted(gt_t, est_t)
+def match_nearest(gt_t: np.ndarray, est_t: np.ndarray, max_dt: float) -> list[tuple[int, int]]:
+    """Pair each estimate stamp with its nearest ground-truth stamp.
+
+    Both inputs are ascending stamps in seconds. Returns index pairs
+    ``(gt_i, est_i)`` -- same order as the arguments -- for which the two stamps
+    are within ``max_dt``; estimates with no GT that close are dropped. So every
+    returned pair satisfies ``abs(gt_t[gt_i] - est_t[est_i]) <= max_dt``, and a
+    caller that wants those differences can recover them from the indices.
+    """
+    # For each est stamp, the insertion point in gt_t: the nearest GT stamp is
+    # either side of it, so only those two are candidates.
+    insert_at = np.searchsorted(gt_t, est_t)
     pairs = []
     for est_i, stamp in enumerate(est_t):
         candidates = []
-        if idx[est_i] > 0:
-            candidates.append(idx[est_i] - 1)
-        if idx[est_i] < len(gt_t):
-            candidates.append(idx[est_i])
+        if insert_at[est_i] > 0:
+            candidates.append(insert_at[est_i] - 1)
+        if insert_at[est_i] < len(gt_t):
+            candidates.append(insert_at[est_i])
         gt_i = min(candidates, key=lambda i: abs(gt_t[i] - stamp))
-        dt = abs(gt_t[gt_i] - stamp)
-        if dt <= max_dt:
-            pairs.append((est_i, gt_i, dt))
+        if abs(gt_t[gt_i] - stamp) <= max_dt:
+            pairs.append((int(gt_i), est_i))
     return pairs
 
 
@@ -58,7 +84,7 @@ def stats(values: np.ndarray) -> dict[str, float]:
     }
 
 
-def evaluate(gt_path: str, est_path: str, max_dt: float):
+def evaluate(gt_path: str, est_path: str, max_dt: float) -> dict[str, Any]:
     gt = np.loadtxt(gt_path, delimiter=",")
     est = np.loadtxt(est_path)
     gt_t = gt[:, 0] * 1e-9
@@ -70,9 +96,11 @@ def evaluate(gt_path: str, est_path: str, max_dt: float):
     if not pairs:
         raise RuntimeError("no timestamp matches found")
 
-    est_i = np.array([p[0] for p in pairs])
-    gt_i = np.array([p[1] for p in pairs])
-    dt = np.array([p[2] for p in pairs])
+    gt_i, est_i = np.asarray(pairs, dtype=int).T
+    # Recovered from the pairing rather than carried through it -- match_nearest
+    # already guarantees every one of these is <= max_dt; reported to show how much
+    # of that budget the matching actually used.
+    dt = np.abs(gt_t[gt_i] - est_t[est_i])
     src = est_p[est_i]
     dst = gt_p[gt_i]
 

@@ -1,10 +1,29 @@
-# Local, machine-specific dataset configs (contain absolute paths)
-config/
+# Local, machine-specific dataset configs (contain absolute paths). `config/*`
+# rather than `config/`: git does not descend into an ignored *directory*, so the
+# negation below would never be reached if the whole tree were excluded.
+config/*
+# ...except the annotated template the README points a new dataset at,
+!config/examples/
+# the DDS profile and QoS overrides (a transport fix, no paths in them),
+!config/dds/
+# and the Hilti dataset facts: rig calibration and which run each sequence uses.
+!config/hilti/
+config/hilti/*
+!config/hilti/platforms.yaml
+!config/hilti/sequences.yaml
 docs
 docker
 results
 .claude
+.codex
 __pycache__/
 imgui.ini
 run_fastlio_bag.py
+# Superseded by src/batch_fastlio.py; kept locally only as a reference.
+run_fastlio_bags.sh
 to_bag_config.md
+
+# Tool caches (see pyproject.toml)
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/

@@ -1,4 +1,4 @@
-"""Shared PCD reading / PLY writing layer for the point-file tools.
+"""Shared PCD reading / PLY + LAS writing layer for the point-file tools.
 
 Splits, like ``pc2_layout.py`` does for PointCloud2, the part that is **fixed by
 the file formats** from the part that **varies per dataset**:
@@ -8,7 +8,11 @@ fixed
     little-endian, and the format has no byte-order field);
   * ``NUMPY_TO_PLY`` -- the PLY scalar type names, which are the eight from the
     original specification. There is no 64-bit integer among them, so an ``I8``
-    /``U8`` PCD column cannot be carried across losslessly (see ``ply_type``).
+    /``U8`` PCD column cannot be carried across losslessly (see ``ply_type``);
+  * ``LAS_SCALE`` / ``LAS_XYZI`` -- LAS's fixed schema. Its coordinates are
+    ``int32 * scale + offset``, so the scale is chosen here rather than inherited
+    from a writer's default, and its dimension list is closed, so anything the
+    cloud carries beyond x/y/z/intensity/colour becomes an ExtraBytes dimension.
 
 varies per dataset
   * which fields a cloud carries and what they are called. PCL emits
@@ -16,9 +20,24 @@ varies per dataset
     PCD but three ``uchar`` properties in PLY -- ``PLY_RENAMES`` / ``unpack_rgb``
     translate, so a viewer sees normals and colours rather than anonymous scalars.
 
-Used by ``to_bag.py`` (the ``pcd`` reader) and ``pcd_to_ply.py``. Deliberately
-free of any ROS/``rosbags`` dependency: converting a map to PLY should not need
-the bag stack installed.
+The two output formats are not interchangeable, and the difference is the reason
+both exist here (``pcd_convert.py --format`` picks one):
+
+PLY
+  a schema-free container. Any property name, any of eight scalar types, written
+  verbatim -- so a cloud round-trips exactly and a viewer shows every field under
+  the name it had. This is the format to check a map in.
+
+LAS
+  the ASPRS survey standard, and the only point-cloud format ``build_map``'s
+  PDAL loader reads. Coordinates are **quantised** to the header scale and the
+  dimension list is fixed. Both cost something, so both are explicit: see
+  ``LAS_SCALE`` and ``to_las_columns``.
+
+Used by ``to_bag.py`` (the ``pcd`` reader) and ``pcd_convert.py``. Deliberately
+free of any ROS/``rosbags`` dependency: converting a map should not need the bag
+stack installed. ``laspy`` is imported only when LAS output is asked for, so PLY
+output needs nothing beyond numpy either.
 """
 import os
 from typing import Any, BinaryIO
@@ -55,9 +74,65 @@ PLY_RENAMES: dict[str, str] = {
 # properties, so unpack_rgb() expands these.
 RGB_FIELDS: tuple[str, ...] = ("rgb", "rgba")
 
+# --- LAS ------------------------------------------------------------------
+# LAS stores each coordinate as an int32 times this scale plus a per-file offset,
+# so the scale is not a compression knob: it *is* the resolution of the file, and
+# writing one means accepting a quantisation error of up to half of it.
+#
+# 1 mm, not PDAL's 0.01 default: a cm grid is coarser than the voxel sizes these
+# maps are built and compared at, and checking a map should not add a layer of
+# error on top of the one being measured. It costs nothing -- the point record is
+# a fixed 4 bytes per axis either way -- so the only reason for a coarser scale is
+# a cloud whose extent does not fit (see write_las).
+LAS_SCALE = 0.001
+
+# The width of a stored coordinate. With LAS_SCALE that is a 2147 km span around
+# the offset -- ample for any of these maps -- but only because the offset is
+# per-file: at offset 0 a UTM easting runs out of int32 after 2.1 km.
+LAS_INT32_MAX = 2**31 - 1
+
+# LAS 1.4, and legacy point formats 0/2 within it. Both halves matter:
+#   * 1.2 cannot be used -- the ExtraBytes VLR is a 1.4 feature, and while laspy
+#     will write one into a 1.2 file, PDAL 2.6.2 does not read it back, so a
+#     `ring`/`t` column silently disappears between writer and reader;
+#   * formats 6-10 cannot be used -- PDAL refuses them outright unless the
+#     global-encoding WKT bit is set, and a FAST-LIO map has no CRS to put in a
+#     WKT VLR. Format 0 (20-byte record) and 2 (+RGB) are read by everything.
+LAS_VERSION = "1.4"
+LAS_POINT_FORMAT_PLAIN = 0
+LAS_POINT_FORMAT_RGB = 2
+
+# The only PCD fields with a real home in the LAS point record. Everything else a
+# cloud carries -- normal_x, ring, t, curvature, label -- becomes an ExtraBytes
+# dimension: still named, still exactly typed (LAS extra bytes even carry the
+# int64 that PLY has to widen to double), but a scalar rather than something a
+# viewer knows how to interpret. See to_las_columns for the conversions.
+LAS_XYZI: tuple[str, ...] = ("x", "y", "z", "intensity")
+RGB_CHANNELS: tuple[str, ...] = ("red", "green", "blue")
+
+# LAS colour is 16-bit per channel while PCD packs 8. 0xFFFF // 0xFF: expands the
+# range properly, so 255 becomes full white rather than 1/257th of it -- which is
+# what a viewer that trusts the declared depth would otherwise show.
+RGB_8_TO_16 = 257
+
+# ExtraBytes VLR field widths, from the specification.
+LAS_EXTRA_NAME_MAX = 32
+LAS_EXTRA_DESC_MAX = 32
+
 
 def _name(f: BinaryIO) -> str:
     return getattr(f, "name", "<pcd>")
+
+
+def _point_count(path: str, columns: dict[str, np.ndarray]) -> int:
+    """The shared length of the columns, or a fatal error naming the odd one out."""
+    if not columns:
+        raise SystemExit(f"{path}: no fields to write")
+    n = len(next(iter(columns.values())))
+    bad = {k: len(v) for k, v in columns.items() if len(v) != n}
+    if bad:
+        raise SystemExit(f"{path}: fields disagree on point count; expected {n}, got {bad}")
+    return n
 
 
 # --------------------------------------------------------------------------
@@ -67,7 +142,7 @@ def read_pcd_header(f: BinaryIO) -> dict[str, Any]:
     """Parse the header of an open PCD, leaving ``f`` on the first data byte.
 
     Separate from the data read so a caller can list a cloud's fields and point
-    count without paying for the payload -- which is what makes ``pcd_to_ply.py``
+    count without paying for the payload -- which is what makes ``pcd_convert.py``
     able to validate a whole batch up front.
     """
     header_lines = []
@@ -241,13 +316,7 @@ def write_ply(path: str, columns: dict[str, np.ndarray], binary: bool = True,
     passed through ``PLY_RENAMES`` so normals arrive as normals; the caller has
     already chosen and ordered the fields.
     """
-    if not columns:
-        raise SystemExit(f"{path}: no fields to write")
-    n = len(next(iter(columns.values())))
-    bad = {k: len(v) for k, v in columns.items() if len(v) != n}
-    if bad:
-        raise SystemExit(f"{path}: fields disagree on point count; expected {n}, got {bad}")
-
+    n = _point_count(path, columns)
     props = [(PLY_RENAMES.get(name, name), col, ply_type(col.dtype, name))
              for name, col in columns.items()]
     header = ["ply", f"format {'binary_little_endian' if binary else 'ascii'} 1.0"]
@@ -273,3 +342,204 @@ def write_ply(path: str, columns: dict[str, np.ndarray], binary: bool = True,
                            for _, col, _ in props)
             np.savetxt(f, np.column_stack([col for _, col, _ in props]), fmt=fmt)
     return n
+
+
+# --------------------------------------------------------------------------
+# LAS
+# --------------------------------------------------------------------------
+def import_laspy(what: str = "LAS output"):
+    """Import laspy, or explain how to get it.
+
+    Deferred rather than imported at module scope so that reading a PCD, writing a
+    PLY and building a bag keep working on numpy alone -- laspy is an extra that
+    only the LAS path needs.
+    """
+    try:
+        import laspy
+    except ImportError:
+        raise SystemExit(f"{what} needs laspy: pip install 'laspy>=2.0' "
+                         f"(or pip install '.[las]')") from None
+    return laspy
+
+
+def check_laz_backend() -> None:
+    """Fail before a batch starts if LAZ compression has no backend.
+
+    laspy itself imports fine without one and only raises when the first file is
+    written, which in a 1400-frame run means failing 1400 times over.
+    """
+    laspy = import_laspy("LAZ output")
+    if not any(b.is_available() for b in laspy.LazBackend):
+        raise SystemExit("LAZ output needs a compression backend: "
+                         "pip install lazrs (or pip install '.[laz]'). "
+                         "Use --format las for uncompressed output")
+
+
+def las_mapped(columns: dict[str, np.ndarray]) -> tuple[str, ...]:
+    """Which of ``columns`` go into the LAS point record proper.
+
+    Colour only counts when all three channels are there: the point format is
+    chosen from this, and a cloud carrying a lone ``red`` gets the plain record
+    plus an extra byte rather than a colour record with two empty channels.
+    """
+    rgb = all(c in columns for c in RGB_CHANNELS)
+    return LAS_XYZI + (RGB_CHANNELS if rgb else ())
+
+
+def las_extra_fields(fields: list[str], dtype: np.dtype) -> list[str]:
+    """Which fields will become ExtraBytes dimensions, from the PCD header alone.
+
+    Runs the real conversion over zero-length columns rather than re-deriving the
+    rule: whether a packed ``rgb`` expands into native colour channels depends on
+    its declared width, and one place should decide that.
+
+    Known before any payload is read, so ``--dry-run`` can say it, and it is a
+    property of the batch rather than of a cloud -- reported once by the caller
+    instead of on every one of 1400 identical frames.
+    """
+    empty = {name: np.empty(0, dtype=dtype[name]) for name in fields}
+    columns, _ = to_las_columns(unpack_rgb(empty))
+    mapped = las_mapped(columns)
+    return [name for name in columns if name not in mapped]
+
+
+def to_las_columns(columns: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], list[str]]:
+    """Fit PCD columns to LAS's fixed schema; returns (columns, notes).
+
+    Unlike the PLY path, this is **not** a lossless re-container. ``notes`` is what
+    it cost *this* cloud -- it ends up in the per-cloud summary rather than being
+    left for the reader to discover. What it cost the *batch* -- which fields have
+    no native LAS home -- is ``las_extra_fields``, reported once.
+
+      * ``intensity`` is a LAS ``uint16``. A float reflectivity is rounded, and
+        anything outside [0, 65535] is clamped rather than wrapped (``astype``
+        would turn 70000 into 4464, a plausible-looking value);
+      * colour is widened from PCD's 8 bits to LAS's 16 (``RGB_8_TO_16``);
+      * everything else is left exactly as it is, to be written as an ExtraBytes
+        dimension under its own name -- so ``normal_x`` stays ``normal_x`` here,
+        where the PLY path renames it to ``nx``. There is no LAS convention to
+        rename it *to*, and a viewer shows it as a named scalar either way.
+
+    Run after ``unpack_rgb``, which is shared with the PLY path: a packed colour
+    has to become three channels before either format can carry it.
+    """
+    out: dict[str, np.ndarray] = {}
+    notes: list[str] = []
+    for name, col in columns.items():
+        if name == "intensity":
+            out[name], clamped = _clamp_to_uint16(col)
+            if clamped:
+                notes.append(f"clamped {clamped} intensity value(s) into LAS uint16")
+        elif name in RGB_CHANNELS and col.dtype == np.uint8:
+            out[name] = col.astype(np.uint16) * RGB_8_TO_16
+        else:
+            # alpha included: LAS has no alpha channel, so it stays a uint8 extra
+            # byte, which carries it exactly.
+            out[name] = col
+    return out, notes
+
+
+def _clamp_to_uint16(col: np.ndarray) -> tuple[np.ndarray, int]:
+    """One column as uint16, saturating instead of wrapping; returns (column, n clamped)."""
+    if col.dtype == np.uint16:
+        return col, 0
+    info = np.iinfo(np.uint16)
+    if col.dtype.kind == "f":
+        # Non-finite first: it compares false against both bounds, so it would
+        # survive the clip and then cast to an arbitrary integer.
+        col = np.where(np.isfinite(col), col, 0.0)
+        col = np.rint(col)
+    over = int(np.count_nonzero((col < info.min) | (col > info.max)))
+    return np.clip(col, info.min, info.max).astype(np.uint16), over
+
+
+def write_las(path: str, columns: dict[str, np.ndarray], scale: float = LAS_SCALE,
+              compress: bool = False, comment: str = "") -> int:
+    """Write {field name: 1-D array} as a LAS/LAZ point cloud; returns the count.
+
+    ``scale`` is the coordinate quantisation step (see ``LAS_SCALE``) and is
+    applied to all three axes, so a map is not finer in x than in z. The offset is
+    per-axis and per-file: ``floor(min)``, which keeps the stored integers small
+    and, more to the point, keeps a georeferenced cloud inside int32 -- with an
+    offset of 0 a UTM easting overflows a 1 mm scale at 2.1 km.
+
+    ``compress`` writes LAZ. The extension is not consulted, because the caller
+    writes to ``<name>.las.part`` first and renames on success.
+
+    Columns must already have been through ``to_las_columns``.
+    """
+    laspy = import_laspy()
+    n = _point_count(path, columns)
+    missing = [a for a in ("x", "y", "z") if a not in columns]
+    if missing:
+        raise SystemExit(f"{path}: no {missing} field(s); a LAS file needs coordinates")
+    if not scale > 0:
+        raise SystemExit(f"{path}: LAS scale must be positive, got {scale}")
+
+    mapped = las_mapped(columns)
+    header = laspy.LasHeader(
+        version=LAS_VERSION,
+        point_format=(LAS_POINT_FORMAT_RGB if RGB_CHANNELS[0] in mapped
+                      else LAS_POINT_FORMAT_PLAIN))
+    header.scales = [scale] * 3
+    header.offsets = _las_offsets(path, columns, scale, n)
+    header.generating_software = "pcd_convert.py"
+    if comment:
+        # LAS has no comment line. A description VLR is where a reader (and
+        # `pdal info --metadata`) can still find where the file came from.
+        header.vlrs.append(laspy.VLR(user_id="SDPIPE", record_id=1,
+                                     description="source"[:LAS_EXTRA_DESC_MAX],
+                                     record_data=comment.encode("utf-8")))
+
+    native = set(header.point_format.dimension_names)
+    for name, col in columns.items():
+        if name in mapped:
+            continue
+        if len(name) > LAS_EXTRA_NAME_MAX:
+            raise SystemExit(f"{path}: field {name!r} is {len(name)} characters; a LAS extra "
+                             f"dimension name is limited to {LAS_EXTRA_NAME_MAX}")
+        if name in native:
+            # laspy accepts the clash and then silently writes the *native*
+            # dimension instead, leaving the extra bytes zeroed.
+            raise SystemExit(f"{path}: field {name!r} collides with the LAS point record's own "
+                             f"{name!r} dimension, which this writer does not populate; drop or "
+                             f"rename it (--fields) to write this cloud as LAS")
+        header.add_extra_dim(laspy.ExtraBytesParams(
+            name=name, type=col.dtype, description=f"PCD {name}"[:LAS_EXTRA_DESC_MAX]))
+
+    las = laspy.LasData(header)
+    for axis in ("x", "y", "z"):
+        # float64 before laspy divides by the scale: the subtraction of a large
+        # offset from a float32 coordinate is where the precision would go.
+        setattr(las, axis, np.asarray(columns[axis], dtype=np.float64))
+    for name, col in columns.items():
+        if name not in ("x", "y", "z"):
+            setattr(las, name, col)
+    with open(path, "wb") as f:
+        las.write(f, do_compress=compress)
+    return n
+
+
+def _las_offsets(path: str, columns: dict[str, np.ndarray], scale: float,
+                 n: int) -> list[float]:
+    """Per-axis LAS offset, checked against the int32 the coordinates go into.
+
+    laspy raises ``OverflowError`` on a value that does not fit, which reads as a
+    numpy problem rather than a format one; this says which axis, how far it is
+    over, and what to do about it.
+    """
+    if not n:
+        return [0.0, 0.0, 0.0]
+    offsets = []
+    for axis in ("x", "y", "z"):
+        col = np.asarray(columns[axis], dtype=np.float64)
+        lo = float(np.floor(np.min(col)))
+        span = (float(np.max(col)) - lo) / scale
+        if span > LAS_INT32_MAX:
+            raise SystemExit(
+                f"{path}: the cloud spans {float(np.max(col)) - lo:.1f} m in {axis}, which at a "
+                f"{scale} m scale needs {span:.3g} > int32 steps. Write it with a coarser "
+                f"--las-scale (at least {(float(np.max(col)) - lo) / LAS_INT32_MAX:.2g}), or as "
+                f"PLY, which stores coordinates as floats and has no such limit")
+        offsets.append(lo)
+    return offsets

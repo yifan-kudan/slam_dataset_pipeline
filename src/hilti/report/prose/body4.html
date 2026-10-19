@@ -1,0 +1,20 @@
+  <section>
+    <h2><span class="ord">07</span> 逐序列 · 全部 15 条 <em>per sequence</em></h2>
+    <div class="col">
+      <p class="lede">
+        每条序列一张图，四块面板：地图的<strong>平面图</strong>与<strong>剖面图</strong>
+        （画的是 <code>.kdm</code> 里的平面体素，即定位器真正匹配的几何，不是原始点云），
+        以及<strong>高度</strong>、<strong>内点率</strong>、<strong>协方差因子</strong>三条随时间的曲线。
+      </p>
+      <p>
+        读图的三个约定。<strong>一</strong>，FAST-LIO 画成宽的橙色带、kd_localizer 画成细的蓝线，
+        两者通常一致到毫米，所以正常情况看到的是「蓝线嵌在橙带里」；
+        分开成两条轨迹才是真的分歧。<strong>二</strong>，高度面板里连续曲线是机体原点、
+        圆点是控制点时刻的<em class="i">棱镜</em>位置 —— 后者才是测绘量到的东西，
+        绿点与彩点之间的竖直间距就是那一对的垂直误差。<strong>三</strong>，
+        平面图与剖面图里的绿星是「估计在控制点时刻所在的位置」，<em class="i">不是</em>测绘坐标：
+        测绘系与地图系没有已知关系（见 <span class="mono">§10</span>）。
+      </p>
+    </div>
+    <!--SEQBLOCKS-->
+  </section>

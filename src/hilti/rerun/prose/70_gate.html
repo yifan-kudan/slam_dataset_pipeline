@@ -1,0 +1,59 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">07</span> &nbsp;the covariance gate</p></div>
+  <h2>Early on all eight, wrong on one of them</h2>
+  <div class="col">
+    <p>
+      Two readings of section 06 are possible and they lead to opposite actions. Either the
+      pose really is coming apart and the gate is doing its job, or the pose is fine and a
+      mis-set threshold is throwing away most of eight bags. So: same map, same bag, same
+      everything, <code>max_pose_sigma_factor_increase</code> 200&nbsp;&rarr;&nbsp;20000.
+    </p>
+  </div>
+
+<pre><code>                 gate 200                    gate 20000
+                 tracked   vs FL p95         tracked   vs FL p95   ended on
+site1_handheld_2   134 s      0.181 m          <span class="add">166 s of 167</span>  <span class="add">0.190 m</span>   <span class="add">no LOST</span>
+site1_handheld_1   140 s      0.169 m          164 s       <span class="del">52.6 m</span>   covariance
+site1_handheld_3   138 s      0.161 m          156 s      <span class="del">41.5 m</span>   covariance
+site1_handheld_5    56 s      0.417 m          146 s      <span class="del">41.9 m</span>   covariance
+site2_handheld_4    17 s      0.138 m           33 s     <span class="del">325.8 m</span>   covariance
+site2_handheld_6    42 s      0.127 m           50 s      0.188 m   <span class="del">predictor</span>
+site2_handheld_5    36 s      0.750 m           38 s       1.256 m   <span class="del">predictor</span>
+site1_handheld_4   257 s      0.169 m           <span class="del">62 s</span>      14.4 m   <span class="del">predictor</span></code></pre>
+
+  <div class="col">
+    <p>
+      One row is a genuine false positive. <code>site1_handheld_2</code> runs its full
+      166&nbsp;s of 167 with no LOST at all, at a p95 of 19&nbsp;cm and a worst frame of
+      67&nbsp;cm — a completely healthy run that the gate had been cutting at 80&nbsp;%. Its
+      covariance factor peaks at 472, so a limit around 2.4&times; the current one would
+      have kept it.
+    </p>
+    <p>
+      The other seven say the gate was early but not wrong. Given room, four of them
+      diverge by tens to hundreds of metres — <code>site2_handheld_4</code> reaches a p95
+      of 326&nbsp;m — and three die on <code>Motion predictor update failed</code>, an
+      uncaught non-convergence in the ESKF's iterated update rather than a diagnostic at
+      all. <code>site1_handheld_4</code> is worse with the looser gate than with the tight
+      one, which is the clearest possible statement that removing the limit is not a fix.
+    </p>
+    <div class="note">
+      <p class="eyebrow">Why the control points cannot arbitrate this</p>
+      <p>
+        <code>site1_handheld_1</code> scores <b>2.2&nbsp;cm</b> on its control points in the
+        run whose trajectory ends up <b>514&nbsp;m</b> from FAST-LIO's. Its surveyed points
+        all sit early in the bag, so the metric never sees the divergence. That is the whole
+        reason for the dense comparison against the sequence's own odometry — 2 to 8
+        surveyed points cannot audit a 200&nbsp;s trajectory, and a control-point score
+        alone would have called this run excellent.
+      </p>
+    </div>
+    <p>
+      So the recommendation is a bounded one: <code>max_pose_sigma_factor_increase</code>
+      of 200 is roughly 2.4&times; too tight for the handheld rig, and moving it to the
+      500&ndash;1000 band recovers a real run. Removing it is not an option, and the
+      <code>Motion predictor update failed</code> path deserves a library ticket on its own
+      — it kills runs that no threshold was consulted about.
+    </p>
+  </div>
+</section>

@@ -1,54 +1,33 @@
 """
 Config-driven converter from a ROS 1 ``.bag`` to a ROS 2 bag.
 
-Unlike ``to_bag.py`` (which builds a bag from LiDAR files + IMU CSV), 
+Unlike ``to_bag.py`` (which builds a bag from LiDAR files + IMU CSV), the input
+here is an existing ROS 1 recording: topics are re-stamped, decimated and repacked
+rather than assembled from raw files.
 """
 import argparse
 import os
 from typing import Any
 
 import numpy as np
-import yaml
 from rosbags.rosbag1 import Reader
-from rosbags.rosbag2 import Writer
-from rosbags.rosbag2.enums import StoragePlugin
-from rosbags.typesys import Stores, get_typestore
-from rosbags.interfaces import (
-    Qos, QosDurability, QosHistory, QosLiveliness, QosReliability, QosTime,
-)
 
 # PointField datatype table, endian-aware strided reads, and the per-dataset
 # knobs (field names, per-point time units). Shared with inspect_bag.py.
 from pc2_layout import (
-    epoch_kind, field_view, find_field, span_warning, to_ns, to_seconds,
+    epoch_kind, field_view, find_field, reset_warnings, span_warning, to_ns, to_seconds,
+    warn_once,
+)
+# Typestore, storage plugins, stamp arithmetic and the latched /tf_static writer.
+# Shared with to_bag.py so both converters emit interchangeable bags.
+from ros2_bag_io import (
+    ROS1_STORE, ROS2_STORE, add_distro_arg, add_group_arg, advance_stamp, apply_distro,
+    atomic_bag, build_camera_info, camera_info_topic, check_topics_present, check_window,
+    filter_groups, load_yaml, normalize_topic, output_summary, select_groups,
+    write_tf_static,
 )
 
-ROS1_STORE = get_typestore(Stores.ROS1_NOETIC) # Setup ROS 1 type store for deserialization
-ROS2_STORE = get_typestore(Stores.ROS2_JAZZY) # Setup ROS 2 type store for serialization
-
-STORAGE_PLUGINS = { # Two storage plugins are supported: SQLite3 and MCAP.
-    "sqlite3": StoragePlugin.SQLITE3,
-    "mcap": StoragePlugin.MCAP,
-}
-
-# Topics whose per-point time span already drew a warning -- warn once per topic
-# rather than once per cloud.
-_warned_topics: set[str] = set()
-
-
-def warn_once(topic: str, message: str | None) -> None:
-    if message and topic not in _warned_topics:
-        _warned_topics.add(topic)
-        print(f"WARNING [{topic}]: {message}")
-
-
-def load_yaml(path: str) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def normalize_topic(name: str) -> str:
-    return name if name.startswith("/") else "/" + name
+CAMERA_INFO_TYPE = "sensor_msgs/msg/CameraInfo"
 
 # shift the per-point time field so it starts at 0, and adjust the header stamp
 def rebase_pointcloud_time(msg, time_field: str, time_unit: str = "s",
@@ -65,6 +44,17 @@ def rebase_pointcloud_time(msg, time_field: str, time_unit: str = "s",
     buf = bytearray(msg.data)  # mutable: the column is rewritten in place
     times = field_view(buf, msg, field, strict=True)
     tmin, tmax = float(times.min()), float(times.max())
+    # The rebase adds tmin to the header stamp, so the column must already be
+    # relative. An absolute Unix column passes the span check (a scan still
+    # spans ~0.1 s) but would push the header forward by ~54 years.
+    kind = epoch_kind(to_ns(tmin, time_unit))
+    if kind != "sensor_relative":
+        raise SystemExit(
+            f"rebase_point_time: '{field.name}' looks {kind} (min={tmin:.6g} "
+            f"{time_unit}), not sensor-relative. Rebasing adds this to the "
+            f"header stamp; for absolute Unix per-point time use "
+            f"repack: hesai_to_velodyne instead."
+        )
     warn_once(topic or time_field, span_warning(to_ns(tmax - tmin, time_unit),
                                                 field.name, time_unit))
     if tmin != 0.0:
@@ -74,15 +64,9 @@ def rebase_pointcloud_time(msg, time_field: str, time_unit: str = "s",
     return msg, stamp_delta_ns
 
 
-def advance_stamp(stamp, delta_ns: int):
-    total = stamp.sec * 1_000_000_000 + stamp.nanosec + delta_ns
-    stamp.sec = int(total // 1_000_000_000)
-    stamp.nanosec = int(total % 1_000_000_000)
-    return stamp
-
-
 def repack_hesai_to_velodyne(msg, time_field: str = "timestamp", time_unit: str = "s",
-                             ring_field: str = "ring", topic: str = ""):
+                             ring_field: str = "ring", topic: str = "",
+                             header_at: str = "scan_start") -> tuple[Any, int]:
     """Rewrite a Hesai PandarXT cloud into the Velodyne layout FAST-LIO reads.
 
     Hesai (Hilti) publishes ``x,y,z,intensity`` (float32), ``timestamp``
@@ -102,7 +86,26 @@ def repack_hesai_to_velodyne(msg, time_field: str = "timestamp", time_unit: str 
     by FAST-LIO's point struct, so it stays hardcoded. The absolute-Unix-time
     assumption is checked rather than assumed -- feeding relative time here would
     subtract ~1.7e9 s from every point.
+
+    ``header_at`` says which end of the sweep the header stamp marks, because that
+    is vendor specific and getting it wrong silently negates every per-point time:
+
+    * ``scan_start`` (Hilti handheld, Hesai PandarXT): the stamp already marks the
+      first point, so it is kept and ``time`` comes out in [0, ~0.1] s.
+    * ``scan_end`` (Hilti robot, Robosense Bpearl -- ``documentation/hardware/
+      Robot.md`` says "the header timestamp corresponds to the last (latest)
+      point", measured: header - max(point time) = 0.000000 s, header -
+      min = +0.0999 s): differencing against that stamp would make every ``time``
+      NEGATIVE, in [-0.1, 0]. The header is moved back to the first point instead,
+      so ``time`` is in [0, ~0.1] s like everywhere else.
+
+    Returns ``(msg, delta_ns)`` -- the shift applied to the header stamp, 0 for
+    ``scan_start``. The caller adds it to the bag write timestamp too, so the
+    message is still written at the moment it was recorded.
     """
+    if header_at not in ("scan_start", "scan_end"):
+        raise SystemExit(f"hesai_to_velodyne: header_at must be 'scan_start' or "
+                         f"'scan_end', got {header_at!r}")
     fmap = {f.name: f for f in msg.fields}
     missing = {"x", "y", "z", "intensity", time_field, ring_field} - set(fmap)
     if missing:
@@ -132,6 +135,13 @@ def repack_hesai_to_velodyne(msg, time_field: str = "timestamp", time_unit: str 
               span_warning(to_ns(tmax - tmin, time_unit), time_field, time_unit))
 
     header_sec = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+    delta_ns = 0
+    if header_at == "scan_end":
+        # Rebase onto the first point. Done in seconds against the same value the
+        # column is differenced by, so `time` starts at exactly 0.
+        start_sec = float(to_seconds(tsrc, time_unit).min())
+        delta_ns = int(round((start_sec - header_sec) * 1e9))
+        header_sec = start_sec
     out = np.zeros(n, dtype=np.dtype({
         "names": ["x", "y", "z", "intensity", "time", "ring"],
         "formats": ["<f4", "<f4", "<f4", "<f4", "<f4", "<u2"],
@@ -159,85 +169,46 @@ def repack_hesai_to_velodyne(msg, time_field: str = "timestamp", time_unit: str 
     msg.row_step = 22 * msg.width
     msg.is_bigendian = False   # the buffer above is written little-endian
     msg.data = out.view(np.uint8).reshape(-1)
-    return msg
-
-
-# rmw "infinite" duration sentinel used by ROS 2 QoS profiles.
-_QOS_INFINITE = QosTime(sec=9223372036, nsec=854775807)
-
-# /tf_static is published transient_local (latched) so late subscribers -- like
-# kd_localizer coming up after bag playback starts -- still receive the one-shot
-# extrinsics. Record the connection with that QoS so `ros2 bag play` re-offers it.
-TF_STATIC_QOS = Qos(
-    history=QosHistory.KEEP_LAST, depth=1,
-    reliability=QosReliability.RELIABLE, durability=QosDurability.TRANSIENT_LOCAL,
-    deadline=_QOS_INFINITE, lifespan=_QOS_INFINITE,
-    liveliness=QosLiveliness.AUTOMATIC, liveliness_lease_duration=_QOS_INFINITE,
-    avoid_ros_namespace_conventions=False,
-)
-
-
-def write_tf_static(writer: Writer, transforms: list[dict[str, Any]], stamp_ns: int) -> int:
-    """Write a single latched /tf_static message from the config `tf_static` list.
-
-    Each entry needs `parent`, `child`, `translation` [x,y,z] and `rotation_xyzw`
-    [x,y,z,w]. kd_localizer reads base_frame_id->lidar (and ->imu when use_imu)
-    from here; it is NOT needed by FAST-LIO (which takes extrinsics from its own
-    YAML). All transforms are stamped at the bag start time so they precede the
-    first sensor message on playback.
-    """
-    Time = ROS2_STORE.types["builtin_interfaces/msg/Time"]
-    Header = ROS2_STORE.types["std_msgs/msg/Header"]
-    Vector3 = ROS2_STORE.types["geometry_msgs/msg/Vector3"]
-    Quaternion = ROS2_STORE.types["geometry_msgs/msg/Quaternion"]
-    Transform = ROS2_STORE.types["geometry_msgs/msg/Transform"]
-    TransformStamped = ROS2_STORE.types["geometry_msgs/msg/TransformStamped"]
-    TFMessage = ROS2_STORE.types["tf2_msgs/msg/TFMessage"]
-
-    stamp = Time(sec=int(stamp_ns // 1_000_000_000), nanosec=int(stamp_ns % 1_000_000_000))
-    tfs = []
-    for t in transforms:
-        tx, ty, tz = t["translation"]
-        qx, qy, qz, qw = t["rotation_xyzw"]
-        tfs.append(TransformStamped(
-            header=Header(stamp=stamp, frame_id=t["parent"]),
-            child_frame_id=t["child"],
-            transform=Transform(
-                translation=Vector3(x=float(tx), y=float(ty), z=float(tz)),
-                rotation=Quaternion(x=float(qx), y=float(qy), z=float(qz), w=float(qw)),
-            ),
-        ))
-    conn = writer.add_connection("/tf_static", "tf2_msgs/msg/TFMessage",
-                                 typestore=ROS2_STORE, offered_qos_profiles=[TF_STATIC_QOS])
-    writer.write(conn, stamp_ns,
-                 ROS2_STORE.serialize_cdr(TFMessage(transforms=tfs), "tf2_msgs/msg/TFMessage"))
-    return len(tfs)
+    return msg, delta_ns
 
 
 def convert(in_bag: str, out_bag: str, cfg: dict[str, Any], limit_sec: float | None = None,
-            start_sec: float | None = None) -> None:
+            start_sec: float | None = None, force: bool = False,
+            base_dir: str | None = None) -> None:
+    """``base_dir`` is what relative `camera_info: from:` paths resolve against
+    (main() passes the config's own directory)."""
+    reset_warnings()   # so a second in-process conversion reports its own warnings
     topic_cfgs = {t["in"]: t for t in cfg["topics"]}
-    storage = cfg.get("output", {}).get("storage_id", "sqlite3")
-    version = int(cfg.get("output", {}).get("version", 9))
-
-    writer = Writer(out_bag, version=version, storage_plugin=STORAGE_PLUGINS[storage])
-    writer.open()
 
     counts: dict[str, int] = {}
-    with Reader(in_bag) as reader:
+    # atomic_bag stages the output and only swaps it in once this block completes:
+    # a read error or a Ctrl-C part way through leaves no half-written bag behind,
+    # and leaves any previous bag at this path untouched.
+    with atomic_bag(out_bag, cfg, force) as writer, Reader(in_bag) as reader:
         conns = [c for c in reader.connections if c.topic in topic_cfgs]
-        if not conns:
-            raise SystemExit(
-                f"none of the configured topics found in {in_bag}\n"
-                f"  wanted: {sorted(topic_cfgs)}\n"
-                f"  present: {sorted({c.topic for c in reader.connections})}"
-            )
+        check_topics_present(topic_cfgs, {c.topic for c in reader.connections}, in_bag)
         out_conns = {}
+        # image topic -> (connection, the one CameraInfo message re-stamped per frame)
+        cam_infos: dict[str, tuple[Any, Any]] = {}
         for c in conns:
             tc = topic_cfgs[c.topic]
             out_topic = normalize_topic(tc.get("out", c.topic))
             out_conns[c.topic] = writer.add_connection(out_topic, c.msgtype, typestore=ROS2_STORE)
             counts[out_topic] = 0
+
+            ci_spec = tc.get("camera_info")
+            if ci_spec:
+                # Built (and the calibration validated) before a single message is
+                # read: a bad path or a stale format would otherwise surface an hour
+                # into a 63 GB conversion.
+                if c.msgtype != "sensor_msgs/msg/Image":
+                    raise SystemExit(f"camera_info is configured on {c.topic}, which is "
+                                     f"{c.msgtype}, not sensor_msgs/msg/Image")
+                ci_msg = build_camera_info(ci_spec, base_dir)
+                ci_topic = normalize_topic(ci_spec.get("out") or camera_info_topic(out_topic))
+                ci_conn = writer.add_connection(ci_topic, CAMERA_INFO_TYPE, typestore=ROS2_STORE)
+                cam_infos[c.topic] = (ci_conn, ci_msg)
+                counts[ci_topic] = 0
 
         t0 = reader.start_time
         tf_static = cfg.get("tf_static")
@@ -264,7 +235,10 @@ def convert(in_bag: str, out_bag: str, cfg: dict[str, Any], limit_sec: float | N
                     continue
                 last_kept_ns[c.topic] = timestamp
 
-            msg = ROS1_STORE.deserialize_ros1(raw, c.msgtype)
+            # Annotated Any: these are typestore-generated classes, so the fields
+            # (`width` on an Image, `header` on anything stamped) exist per msgtype
+            # and cannot be seen statically.
+            msg: Any = ROS1_STORE.deserialize_ros1(raw, c.msgtype)
 
             frame_id = tc.get("frame_id")
             if frame_id is not None and hasattr(msg, "header"):
@@ -276,11 +250,18 @@ def convert(in_bag: str, out_bag: str, cfg: dict[str, Any], limit_sec: float | N
             time_unit = tc.get("time_unit", "s")
             if tc.get("type") == "pointcloud2" and tc.get("repack") == "hesai_to_velodyne":
                 # Hesai per-point time is absolute Unix seconds -> repack to the
-                # Velodyne layout with a relative float32 `time`. The header
-                # stamp already marks scan start, so it (and write_stamp) stay.
-                msg = repack_hesai_to_velodyne(
+                # Velodyne layout with a relative float32 `time`. With
+                # header_at: scan_start (the default) the header stamp already
+                # marks scan start and nothing moves; with scan_end it is pulled
+                # back to the first point, and write_stamp follows so the message
+                # is still delivered when it was recorded.
+                msg, delta_ns = repack_hesai_to_velodyne(
                     msg, tc.get("time_field", "timestamp"), time_unit,
-                    tc.get("ring_field", "ring"), c.topic)
+                    tc.get("ring_field", "ring"), c.topic,
+                    tc.get("header_at", "scan_start"))
+                if delta_ns:
+                    advance_stamp(msg.header.stamp, delta_ns)
+                    write_stamp = timestamp + delta_ns
             elif tc.get("type") == "pointcloud2" and tc.get("rebase_point_time", False):
                 msg, delta_ns = rebase_pointcloud_time(
                     msg, tc.get("time_field", "time"), time_unit, c.topic)
@@ -339,9 +320,28 @@ def convert(in_bag: str, out_bag: str, cfg: dict[str, Any], limit_sec: float | N
             writer.write(out_conn, write_stamp, ROS2_STORE.serialize_cdr(msg, c.msgtype))
             counts[out_conn.topic] += 1
 
-    writer.close()
+            # One camera_info per image, carrying the image's own stamp and
+            # frame_id: image_transport's CameraSubscriber synchronizes the pair
+            # by EXACT time, so a single latched message (or one stamped from the
+            # bag clock) would leave those consumers waiting forever.
+            ci = cam_infos.get(c.topic)
+            if ci is not None:
+                ci_conn, ci_msg = ci
+                if (ci_msg.width, ci_msg.height) != (msg.width, msg.height):
+                    raise SystemExit(
+                        f"camera_info: calibration is for {ci_msg.width}x{ci_msg.height} but "
+                        f"{c.topic} carries {msg.width}x{msg.height} images -- wrong "
+                        f"calibration file, or the images were scaled/cropped"
+                    )
+                ci_msg.header.stamp.sec = int(msg.header.stamp.sec)
+                ci_msg.header.stamp.nanosec = int(msg.header.stamp.nanosec)
+                ci_msg.header.frame_id = msg.header.frame_id
+                writer.write(ci_conn, write_stamp,
+                             ROS2_STORE.serialize_cdr(ci_msg, CAMERA_INFO_TYPE))
+                counts[ci_conn.topic] += 1
+
     summary = ", ".join(f"{n} {t}" for t, n in counts.items())
-    print(f"done: {summary} -> {out_bag}")
+    print(f"done: {summary} -> {out_bag} [{output_summary(cfg)}]")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -354,12 +354,21 @@ def main(argv: list[str] | None = None) -> None:
                         help="stop at N seconds from bag start (upper bound of the window)")
     parser.add_argument("--start-sec", type=float, default=None,
                         help="skip messages before N seconds from bag start (lower bound of the window)")
+    parser.add_argument("--force", action="store_true",
+                        help="replace an existing output bag (only once the new one is "
+                             "complete -- a failed conversion leaves the old bag intact)")
+    add_distro_arg(parser)
+    add_group_arg(parser)
     args = parser.parse_args(argv)
-    if args.start_sec is not None and args.limit_sec is not None and args.start_sec >= args.limit_sec:
-        raise SystemExit(f"--start-sec ({args.start_sec}) must be < --limit-sec ({args.limit_sec})")
-    if os.path.exists(args.output):
+    check_window(args.start_sec, args.limit_sec)
+    if os.path.exists(args.output) and not args.force:
         raise SystemExit(f"output already exists: {args.output}")
-    convert(args.in_bag, args.output, load_yaml(args.config), args.limit_sec, args.start_sec)
+    cfg = apply_distro(load_yaml(args.config), args.ros_distro)
+    groups = select_groups(cfg, args.groups)
+    print(f"groups: {', '.join(groups)}")
+    convert(args.in_bag, args.output, filter_groups(cfg, groups), args.limit_sec,
+            args.start_sec, args.force,
+            base_dir=os.path.dirname(os.path.abspath(args.config)))
 
 
 if __name__ == "__main__":

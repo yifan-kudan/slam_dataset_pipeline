@@ -1,0 +1,97 @@
+  <section>
+    <h2><span class="ord">05</span> 定位结果 · 全部 15 条 <em>localization</em></h2>
+    <div class="col">
+      <p>
+        交付配置对全部序列相同，没有针对任何一条调参：
+        ConSLAM 那三项改动原样继承（<code>min_ray_inlier_ratio 0</code>、
+        <code>predicted_pose_time_tolerance 0.02</code>、<code>max_pose_sigma_factor_increase 200</code>），
+        加上 <code>prior_gravity_sigma 0.3</code>；<code>track_only</code> 打开，relocalizer 关闭，
+        <code>-r 1</code> 播放，每条序列用它自己摆平后的地图。
+      </p>
+    </div>
+
+    <div class="scroll"><!--TBL:main--></div>
+
+    <div class="note">
+      <p class="hd">两个口径必须说清楚</p>
+      <p>
+        <strong>「vs FAST-LIO」不是精度，是一致性。</strong>
+        每条序列的 <code>.kdm</code> 就是用它自己那条 FAST-LIO 轨迹建的，所以两者<em class="i">本该</em>重合，
+        不需要任何对齐 —— 偏差即分歧所在。它的价值在于密集（5–10 Hz 覆盖全程），
+        而控制点只有 2–8 个；两者矛盾时以控制点为准。
+      </p>
+      <p>
+        <strong>控制点少的序列不产出精度数字。</strong>
+        <code>site2_handheld_4</code> 与 <code>site2_handheld_6</code> 在跟踪窗口内各只有 1 个控制点，
+        <code>site1_handheld_5</code> 也不足 2 个 —— 成对距离需要至少两个点，
+        因此这三条只报「有没有坏」，不报精度。
+      </p>
+    </div>
+
+    <figure>
+      <div class="figmat"><!--FIG:fig_sigma--></div>
+      <figcaption>
+        <b>图 4 · 协方差上限 200 放在了对的位置</b>
+        每条序列在 TRACKING 期间的位姿协方差因子，从中位数（浅）拉到峰值（深）。
+        三条机器人 13–41、site3 四条手持 11–48 —— <strong>全部在 200 以内</strong>，
+        而 <code>site2_robot_1</code> 的峰值 41 已经<strong>超过库默认上限 20</strong>，
+        且那一刻位姿是健康的：用默认值这一条会被误判 Lost。
+        另一侧，site1 五条与 site2 两条手持都冲到 136–190，落在 200 附近 ——
+        <span class="mono">§09</span> 说明为什么把上限抬高换不来跟通。
+      </figcaption>
+    </figure>
+
+    <figure>
+      <div class="figmat"><!--FIG:fig_agreement--></div>
+      <figcaption>
+        <b>图 5 · 与建出各自地图的那条轨迹逐帧比对</b>
+        14 条序列的 |kd − FAST-LIO|，同一地图系内直接相减、不做对齐。
+        中位数 <strong>7–31 mm</strong>，量级上就是「同一条轨迹」。
+        红色竖线是第一次判 Lost 的时刻 —— 七条被判 Lost 的序列里，
+        误差<em class="i">在竖线处</em>才冲破 1 m，此前一路贴在厘米级：
+        说明诊断抓的是真发散的起点，不是在健康段乱报。
+        唯一的例外是 <code>site2_robot_1</code>（右下），它没有 Lost，
+        误差却在 t+634 s 跳上 2.7 m —— 那是里程计错了、定位器没跟，见 <span class="mono">§08</span>。
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="ord">06</span> 地图几何 · 定位器实际匹配的东西 <em>map geometry</em></h2>
+    <div class="col">
+      <p>
+        <code>.kdm</code> 里真正参与配准的是<strong>平面体素</strong>，不是原始点云。
+        把 14 张地图的平面体素按法向分成两类 ——
+        |n<sub>z</sub>| &gt; 0.85 的是楼板与坡道（约束高度），
+        |n<sub>z</sub>| &lt; 0.35 的是墙与柱（约束水平位置）—— 出现一个干净的平台级差别。
+      </p>
+      <p>
+        <strong>三条机器人地图是 72–84% 水平 / 13–25% 垂直</strong>：
+        机器人在大开间楼板上行驶，看到的绝大多数是地面和顶板。
+        <strong>十一条手持地图是 34–59% 水平 / 35–59% 垂直</strong>，明显更均衡。
+        参照 ConSLAM 那四张接近 45/45 的地图，机器人这一组是本数据集里最偏斜的。
+      </p>
+      <p>
+        这解释了一件本来反直觉的事：机器人序列精度最好，而它的<em class="i">墙面</em>支撑最少。
+        它靠的是楼板 —— 而楼板恰好约束的正是 <span class="mono">§04</span> 里出问题的那个轴。
+        机器人序列的垂直误差因此不是地图缺几何，而是地图<em class="i">继承</em>了里程计的垂直压缩。
+      </p>
+      <p>
+        地图 extent 也在这张图里露了马脚：<code>site2_handheld_4</code> 的平面体素跨度达
+        <strong>149.7 × 46.7 × 13.2 m</strong>，而它的实际路径只有 <strong>63.2 m</strong> ——
+        一条 63 m 的手持路线不可能覆盖 150 m 的范围，这本身就是那条轨迹错了的独立证据。
+      </p>
+    </div>
+
+    <figure>
+      <div class="figmat"><!--FIG:fig_maps--></div>
+      <figcaption>
+        <b>图 6 · 全部 14 张 .kdm 平面地图</b>
+        平面图，按法向着色。橙 = 水平面（楼板、坡道），蓝 = 垂直面（墙、柱）。
+        上排三条机器人序列几乎全橙；site1 与 site3 的手持地图蓝色骨架清晰可见。
+        每张图的取景按各自轨迹范围而定，所以图幅之间不可比大小，
+        标题里的 extent 才是可比的量。
+        <code>site2_handheld_5</code> 不在此列 —— 它没有地图。
+      </figcaption>
+    </figure>
+  </section>

@@ -1,0 +1,122 @@
+# Template for a new dataset: per-frame PCD clouds + CSV IMU + CSV ground truth.
+#
+# Annotated with the knobs you are most likely to have to change. Probe the
+# source data first -- `python3 src/inspect_bag.py` for a bag, or just read a PCD
+# header -- to find the real field names and units, then set them here.
+#
+#   python3 src/to_bag.py /path/to/sequence -o /path/to/out_bag \
+#     -c config/examples/bag_pcd_example.yaml
+
+output:
+  storage_id: sqlite3     # sqlite3 | mcap
+  ros_distro: both        # both (metadata v8, Humble + Jazzy) | humble | jazzy
+                          # `jazzy` writes metadata v9, which Humble cannot open.
+                          # Set `version: 8|9` instead to name the format directly.
+
+sources:
+  # ---------------------------------------------------------------- LiDAR ---
+  - out: /velodyne_points
+    type: pointcloud2     # pointcloud2 | imu | odometry
+    frame_id: velodyne
+    dir: pcd
+    pattern: "*.pcd"
+    format: pcd           # pcd | conpr_livox_bin | xyzi_bin
+
+    # Where each frame's timestamp comes from.
+    #   stamp_from: filename  -- the file stem IS the timestamp (e.g. 1685528703098571062.pcd)
+    #   stamp_from: file      -- filenames are indices; read stamps from a list
+    #                            (one row per file, in sorted filename order)
+    stamp_from: filename
+    stamp_unit: ns          # s | ms | us | ns
+    stamp_shift_sec: 0.0    # LiDAR<->IMU clock offset, if the rig has one
+    # stamp_from: file
+    # stamp_file: timestamps.txt
+    # stamp_column: 0
+
+    # Source per-point columns. Omit any of these and the reader falls back to
+    # the vendor alias lists in src/pc2_layout.py (time: time/t/timestamp/
+    # offset_time, ring: ring/channel/line/laser_id, intensity: intensity/i/
+    # reflectivity/...). Set them explicitly when the guess would be wrong.
+    time_field: time        # per-point time column in the PCD
+    time_unit: s            # s | ms | us | ns -- a wrong unit is off by 1000x,
+                            # so the converter warns if the span is not scan-shaped
+    ring_field: ring
+    intensity_field: intensity
+    drop_zero_points: true
+
+    # Output layout. Presets (src/pc2_layout.py LAYOUT_PRESETS):
+    #   velodyne   x,y,z,intensity,time(f32 s rel),ring(u16)  <- FAST-LIO / kd_localizer
+    #   ouster     x,y,z,intensity,t(u32 ns rel),ring(u16)
+    #   livox_pc2  x,y,z,intensity,time(f32 s),tag(u8),line(u8)
+    #   xyzi       x,y,z,intensity
+    # A layout field whose source column is absent is written as zeros, with a
+    # warning -- 'time' missing means no de-skew, 'ring' missing means no
+    # vertical downsampling.
+    layout: velodyne
+    # Or spell the layout out. `from` is the canonical source name, `name` is
+    # what gets written, so this is also how you rename a column:
+    # fields:
+    #   - {name: x,         type: float32}
+    #   - {name: y,         type: float32}
+    #   - {name: z,         type: float32}
+    #   - {name: intensity, type: float32}
+    #   - {name: t,         type: float32, from: time}   # emit `t`, not `time`
+    #   - {name: ring,      type: uint16}
+    # point_step: 24        # defaults to the packed extent; set to pad
+    #
+    # A time column's unit follows its type -- float => seconds, integer =>
+    # nanoseconds (0.1 s would otherwise truncate to 0 in an int). Override with
+    # `unit: s|ms|us|ns` on the field.
+
+    # min_dt_sec: 0.0             # drop frames closer together than this
+    # write_stamp_shift_sec: 0.0  # delay the bag WRITE stamp only (header keeps
+                                  # sensor time) so a streaming consumer has the
+                                  # covering IMU buffered before the scan arrives
+
+  # ------------------------------------------------------------------ IMU ---
+  - out: /imu
+    type: imu
+    frame_id: imu_link
+    path: imu.csv
+    delimiter: ","
+    skip_rows: 0
+    stamp_unit: ns
+    # Name every column of the CSV, in order. "_" skips one.
+    # Known names: t, qx, qy, qz, qw, wx, wy, wz, ax, ay, az
+    # This is what makes column order a config problem rather than a code one:
+    #   ConPR   : [t, qx, qy, qz, qw, wx, wy, wz, ax, ay, az]
+    #   EuRoC   : [t, wx, wy, wz, ax, ay, az]              (no orientation)
+    #   qw-first: [t, qw, qx, qy, qz, wx, wy, wz, ax, ay, az]
+    columns: [t, qx, qy, qz, qw, wx, wy, wz, ax, ay, az]
+
+  # --------------------------------------------------------- ground truth ---
+  - out: /gt/odom
+    type: odometry
+    frame_id: map
+    child_frame_id: imu_link
+    path: gt.csv
+    delimiter: ","
+    stamp_unit: ns
+    # TUM format is [t, x, y, z, qx, qy, qz, qw]; EuRoC state GT is qw-first, so
+    # write [t, x, y, z, qw, qx, qy, qz]. Getting this wrong rotates the whole
+    # trajectory with no error, so check it against the dataset's own docs.
+    columns: [t, x, y, z, qx, qy, qz, qw]
+    orientation: columns    # columns | nearest_imu (for position-only GT)
+    publish_at: rows        # rows, or a topic name to resample onto its stamps
+
+# Latched /tf_static. Only needed by consumers that read extrinsics from tf
+# (kd_localizer); FAST-LIO takes them from its own YAML. Each entry takes either
+# translation + rotation_xyzw, or a 4x4 matrix as calibration files ship it.
+# tf_static:
+#   - parent: imu_link
+#     child: velodyne
+#     translation: [0.0, 0.0, 0.0]
+#     rotation_xyzw: [0.0, 0.0, 0.0, 1.0]
+#   - parent: imu_link
+#     child: velodyne
+#     matrix_is: parent_to_child   # or child_to_parent, to invert
+#     matrix:
+#       - [1.0, 0.0, 0.0, 0.0]
+#       - [0.0, 1.0, 0.0, 0.0]
+#       - [0.0, 0.0, 1.0, 0.0]
+#       - [0.0, 0.0, 0.0, 1.0]

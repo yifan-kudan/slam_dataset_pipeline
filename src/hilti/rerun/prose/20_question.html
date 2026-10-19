@@ -1,0 +1,58 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">02</span> &nbsp;why re-run anything</p></div>
+  <h2>Every earlier number was computed from half the data</h2>
+  <div class="col">
+    <p>
+      The Hilti&nbsp;2023 evaluation had been run before, sequence by sequence, and it
+      reported figures that looked reasonable. Then the reason one sequence "could not be
+      mapped" turned out to be that FAST-LIO had only ever seen 47&nbsp;% of its LiDAR
+      frames — and that this was true of <em>every</em> run in the workspace, at
+      45&ndash;53&nbsp;%.
+    </p>
+    <p>
+      The cause is not FAST-LIO and not the network. Its cloud subscription is
+      <code>rclcpp::SensorDataQoS()</code> — best-effort, <code>KeepLast(5)</code> — while
+      a Hilti cloud is 1.37&nbsp;MB. Fast&nbsp;DDS carries intra-host payload over shared
+      memory, so the kernel's UDP counters stay at zero throughout, and the default
+      shared-memory segment cannot hold that sample stream: when the writer finds no free
+      buffer, best-effort <em>drops at the writer</em> rather than waiting. Raising
+      <code>net.core.rmem_max</code> does nothing. Deepening the reader's queue does
+      nothing — 67&nbsp;% loss became 65&nbsp;%, which places the drop upstream of the
+      reader entirely.
+    </p>
+    <p>
+      What does work is a larger segment, declared outside the code so that upstream QoS
+      stays exactly as a real LiDAR driver would need it:
+    </p>
+  </div>
+
+<pre><code><span class="cmt">config/dds/fastdds_shm_big.xml, exported as FASTRTPS_DEFAULT_PROFILES_FILE
+for the node AND for `ros2 bag play` -- they share one environment</span>
+
+&lt;segment_size&gt;134217728&lt;/segment_size&gt;           <span class="cmt">128 MB, up from 512 KB</span>
+&lt;maxMessageSize&gt;4194304&lt;/maxMessageSize&gt;
+&lt;port_queue_capacity&gt;1024&lt;/port_queue_capacity&gt;
+
+<span class="cmt">maxMessageSize is camelCase. The snake_case spelling fails XML
+validation and silently voids the whole profile -- Fast DDS logs
+nothing, and every cloud is lost exactly as before.</span></code></pre>
+
+  <div class="col">
+    <p>
+      With it, a synthetic 10&nbsp;Hz stream of 1.37&nbsp;MB samples arrives complete
+      (200 of 200, against 67 without), and a real bag delivers 929 of 929 clouds against
+      331. That fix landed as a default in <code>src/batch_fastlio.py</code>, which is why
+      this campaign exists: <b>no result in the previous report is comparable to one taken
+      after it</b>, so the whole dataset had to go through the pipeline again from the bag.
+    </p>
+    <p>
+      The re-run is also the first chance to ask a question the dataset was built for and
+      the earlier evaluation never touched. Giving every sequence its own map is the easy
+      case twice over: the map contains exactly the geometry the bag is about to see, and
+      the map frame <em>is</em> the rig's start pose, so tracking begins from a known
+      identity with no prior to supply. Building once and localizing on every later visit
+      is the case that matters on a site — so this run also picks one hub map per site and
+      replays every other sequence of that site against it.
+    </p>
+  </div>
+</section>

@@ -1,0 +1,50 @@
+# Hilti SLAM Challenge 2023 rig data: what differs between the two platforms and
+# is needed to score or replay a sequence. Calibration, not machine configuration,
+# so unlike the rest of config/ this file IS committed (see .gitignore).
+#
+# Sources, all cross-checked against each other:
+#   * handheld prism offset    the recordings' own /tf_static (imu -> measurement_tip)
+#   * robot lidar_from_imu     groundtruth_2023/extrinsics_robot.yaml, lidar0.T_here_imu0
+#   * static_tf                the same kalibr extrinsic, inverted, and verified against
+#                              both the /tf_static the newer bags carry and the
+#                              extrinsic_T in config/hilti/fast_lio_hilti*.yaml
+
+# The sequence name carries the platform: site2_robot_1 is the robot, everything
+# else is the handheld rig.
+robot_name_pattern: robot
+
+platforms:
+  handheld:
+    # Alphasense. ~400 Hz IMU, so kd_localizer's 1 ms predicted_pose_time_tolerance
+    # default has no margin (see src/hilti/gen_cfg.py).
+    imu_hz: 400
+    # imu -> measurement_tip, the 20 cm boom. The survey measured this prism, NOT the
+    # IMU origin: scoring the IMU pose directly invents ~20 cm of error, and using
+    # this arm on the robot instead of its own invents ~1.5 m.
+    prism_in_imu: [0.059, -0.00855, 0.1964]
+    # Hesai per-point time is absolute Unix seconds, rewritten relative by the
+    # converter's hesai_to_velodyne repack.
+    time_column: relative_after_repack
+    # imu_link -> velodyne, published at run time for the 10 bags that were rebagged
+    # with config/hilti/rebag_hilti_fastlio.yaml, which drops /tf_static.
+    static_tf:
+      translation: [-0.006950465, -0.006713482, 0.049893461]
+      rotation_xyzw: [0.7094397, -0.7047651, 0.0011358, -0.0002509]
+  robot:
+    # XSens MTi-600, 200 Hz, mounted x-up (which is why a FAST-LIO map frame from
+    # this platform is ~90 deg off vertical -- see src/hilti/align_map.py).
+    imu_hz: 200
+    # No constant prism offset: <seq>_lidar.txt gives the prism position in the LIDAR
+    # frame at every control point. This is imu -> lidar, inverted at use to push
+    # those points into the IMU frame.
+    lidar_from_imu:
+      - [0.9993809082422996, -0.003397272928783347, 0.03501797791768812, -0.13406141062872667]
+      - [-0.0036988105559615262, -0.9999566093030182, 0.008549755065630918, -0.010899820828818012]
+      - [0.03498741261178718, -0.0086739868491098, -0.9993501102771111, 0.006109253103427932]
+      - [0.0, 0.0, 0.0, 1.0]
+    # The robot's header stamp marks the scan END, which the bag converter already
+    # pulled back to the first point (header_at: scan_end).
+    time_column: relative_after_repack
+    static_tf:
+      translation: [0.133724351, -0.011301799, 0.010893033]
+      rotation_xyzw: [0.9998359, -0.0017743, 0.0175042, 0.0043066]

@@ -1,0 +1,99 @@
+  <section>
+    <h2><span class="ord">03</span> 发现一 · 重力先验与 FAST-LIO 地图系不兼容 <em>finding 1</em></h2>
+    <div class="col">
+      <p class="lede">
+        地图完好、内点率 0.87，位姿照样转到 89° 并滑出 32 m。原因不在地图，在一行硬编码。
+      </p>
+      <p>
+        <code>kd_amr_libs/localization/src/motion_model/imu.cpp:139</code>
+        把 ESKF 的重力状态种在<em class="i">地图系的</em> −Z：
+      </p>
+      <pre>prior.gravity_direction = -Vector3d::UnitZ();</pre>
+      <p>
+        协方差是一个 2×2（球面上 2 自由度）块，由 <code>prior_gravity_sigma</code> 缩放。
+        但 FAST-LIO 的地图系就是第一帧处理时的 IMU 系，因此<strong>继承 IMU 的物理安装朝向</strong>。
+        <strong>全部 15 条都测了一遍，没有一条对齐</strong>：
+        机器人 87.75–91.79°（XSens MTi-600 是 <strong>x 轴朝上</strong>装的），
+        手持 177.08–179.72°（Alphasense 是 <strong>z 轴朝下</strong>）。
+        取值来自滤波器自己的重力状态（<code>pos_log</code> 末三列的中段中位数），
+        并与原始 <code>/imu</code> 流的前 1 s 均值双向确认。
+      </p>
+    </div>
+
+    <figure>
+      <div class="figmat"><!--FIG:fig_tilt--></div>
+      <figcaption>
+        <b>图 2 · 倾角是平台属性，不是运行属性</b>
+        每条序列的 FAST-LIO 地图系里「真实的上」与 <code>imu.cpp:139</code> 假定的 +Z 之间的夹角。
+        两个平台各自聚成一簇、簇内散布不超过 2.7°，说明这是机械安装决定的，不是某次运行的偶然。
+        九条手持落在 <strong>177–180°</strong> 区间 —— 那是 2 自由度球面参数化的对极点附近，
+        修正梯度趋于零，是最坏的一种情形；<code>site1_handheld_1</code> 只差 <strong>0.28°</strong> 就是精确对极点。
+        ConSLAM 之所以从未暴露这个问题，只是因为它的地图系恰好只偏 0.98–9.51°。
+      </figcaption>
+    </figure>
+
+    <div class="scroll"><!--TBL:tilt--></div>
+
+    <div class="note badbox">
+      <p class="hd">失效特征值得单独记住</p>
+      <p>
+        它<em class="i">不</em>表现为配准失败。<code>site2_robot_3</code> 在未摆平的地图里内点率中位数 0.874、
+        初始对齐正常、开头几十秒位姿正确，然后姿态转到 89°、位置滑到 z = −32 m。
+        平面对齐每帧都在拉回来，而两帧之间 IMU 递推按错了将近 90° 的重力方向补偿，
+        最多差 9.8 m/s²，直到对齐拉不住。诊断里报出来的是
+        <code>Pose covariance is too high (Rotation Z)</code> ——
+        <strong>没有任何一项诊断指向重力</strong>。
+      </p>
+    </div>
+
+    <div class="col">
+      <h3>修法：建图时把点云摆平</h3>
+      <p>
+        在 <code>.kdm</code> 构建时把点云旋转到 +Z 朝上（真实测绘地图本来就是这样），
+        并把随之而来的初始位姿写进配置。设备起点仍在地图原点，所以只有旋转非零：
+      </p>
+      <pre>p_new = R_align · p_old        R_align · up_old = +Z
+T_newmap_base(t0) = R_align    → initial_pose.rotation = euler(R_align)</pre>
+      <p>
+        <code>rotation</code> 是 <strong>[roll, pitch, yaw] 弧度</strong>、
+        <code>R = Rz(yaw)·Ry(pitch)·Rx(roll)</code>（<code>kd_amr_libs/math/src/rotation.cpp:18</code>）。
+        这个约定没有靠猜 —— <code>align_map.py</code> 里对欧拉往返和「重力确实被摆平」两件事都做了数值断言，
+        免得约定错了以后表现为结果里莫名其妙的 90° 偏移。
+        控制点成对距离与坐标系无关，因此评分口径完全不用改；
+        只有跟 FAST-LIO 轨迹直接对比时需要先施加 <code>R_align</code>。
+      </p>
+      <p>
+        本报告后面全部 14 张 <code>.kdm</code> 都是摆平后建的，
+        逐序列图里的「map z (up)」因此就是真实垂直方向。
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="ord">04</span> 发现二 · 误差由垂直落差决定 <em>finding 2</em></h2>
+    <div class="col">
+      <p class="lede">
+        把全部序列的控制点对按<em class="i">垂直</em>间距分组，规律很干净：同层点对厘米级，跨层点对全错。
+      </p>
+      <p>
+        误差不随水平距离或时长增长 —— 同层点对在 14–50 m 基线上误差 0.4–12.7 cm，
+        而每一个跨越楼层的点对都错 24–171 cm，其中<strong>垂直分量本身错 25–45%</strong>。
+        分解沿估计自己的重力向量做，因为测绘系的 z 就是垂直方向。
+      </p>
+    </div>
+
+    <figure>
+      <div class="figmat"><!--FIG:fig_vertical--></div>
+      <figcaption>
+        <b>图 3 · 同一批点对，两种自变量</b>
+        左：误差对<em class="i">垂直</em>间距 —— 灰带内（同层，|Δz| &lt; 0.2 m）几乎全部在 20 cm 以下，
+        带外迅速上到米级。右：同一批点对对<em class="i">水平</em>基线 —— 从 0 到 61 m 没有趋势，
+        实心点（跨层）在整个横轴上都高，空心点（同层）在整个横轴上都低。
+        也就是说决定误差的是有没有爬楼，不是走了多远。
+        <code>site2_handheld_5</code> 的 r0.3 运行已排除（它的点对误差是 4 000 m 量级，
+        会把两张图压成一条线）—— 它单独见 <span class="mono">§08</span>。
+      </figcaption>
+    </figure>
+
+    <div class="scroll"><!--TBL:pairs--></div>
+  </section>

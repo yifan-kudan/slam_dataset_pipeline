@@ -1,0 +1,71 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">10</span> &nbsp;reproducing it</p></div>
+  <h2>The whole campaign, as commands</h2>
+  <div class="col">
+    <p>
+      Every path resolves through <code>config/paths.yaml</code>, so nothing below is
+      machine-specific. <code>config/hilti/sequences.yaml</code> names the run each
+      sequence's numbers come from; it now says <code>default_run: rerun_r1.0</code> for
+      all fifteen, which is the first time one run has covered the whole dataset.
+    </p>
+  </div>
+
+<pre><code><span class="cmt"># 1  FAST-LIO over all 15, two batches because the rigs need different configs</span>
+python3 src/batch_fastlio.py --dataset hilti_2023 --glob '*_fastlio_bag' \
+    --config-file hilti/fast_lio_hilti.yaml       --run-name rerun_r1.0 -r 1.0 --no-rviz \
+    --only $HANDHELD
+python3 src/batch_fastlio.py --dataset hilti_2023 --glob '*_fastlio_bag' \
+    --config-file hilti/fast_lio_hilti_robot.yaml --run-name rerun_r1.0 -r 1.0 --no-rviz \
+    --only $ROBOT
+
+<span class="cmt"># 2  score, then measure each map frame's gravity tilt</span>
+for s in $SEQS; do
+  python3 src/hilti/eval_fastlio.py "$s" --run rerun_r1.0 --json auto --tag rerun
+  python3 src/hilti/align_map.py    "$s" --run rerun_r1.0
+done
+
+<span class="cmt"># 3  levelled LAS + .kdm, in the mapping container (it has PDAL)</span>
+RUN=rerun_r1.0 SERVICE=mapping scripts/hilti/in_container.sh \
+    /opt/sdp/scripts/hilti/build_maps.sh
+
+<span class="cmt"># 4  own-map localization</span>
+for s in $SEQS; do
+  python3 src/hilti/gen_cfg.py "$s"
+  scripts/hilti/in_container.sh /opt/sdp/scripts/hilti/run_seq.sh "$s" 1
+  python3 src/hilti/eval_localizer.py "$s" --run rerun_r1.0 --json auto
+done
+
+<span class="cmt"># 5  pick a hub per site from the measured coverage, not from map size</span>
+python3 src/hilti/xseq.py coverage --run rerun_r1.0
+for site in 1 2 3; do
+  python3 src/hilti/xseq.py matrix --site $site --run rerun_r1.0 --half-extent 70 --yaw-step 2
+done
+python3 src/hilti/xseq.py hubs
+
+<span class="cmt"># 6  cross-sequence: register, then replay against the hub's map</span>
+python3 src/hilti/xseq.py register "$HUB" "$SEQ" --run rerun_r1.0 --half-extent 70
+python3 src/hilti/gen_cfg.py "$SEQ" --map-seq "$HUB"
+NAME=${SEQ}_in_${HUB} scripts/hilti/in_container.sh \
+    /opt/sdp/scripts/hilti/run_seq.sh "$SEQ" 1
+python3 src/hilti/eval_localizer.py "$SEQ" --run rerun_r1.0 \
+    --csv  "$RES/run_${SEQ}_in_${HUB}.csv" \
+    --align "$RES/xreg_${SEQ}_in_${HUB}.json" \
+    --json  "$RES/kd_${SEQ}_in_${HUB}.json"
+
+<span class="cmt"># 7  the report: collect -> figures -> tables -> assemble</span>
+python3 src/hilti/rerun/collect.py &amp;&amp; python3 src/hilti/rerun/figures.py
+python3 src/hilti/rerun/tables.py  &amp;&amp; python3 src/hilti/rerun/assemble.py</code></pre>
+
+  <div class="col">
+    <p>
+      Two of those steps changed shape for this campaign.
+      <code>src/hilti/xseq.py</code> is new: it does for Hilti what
+      <code>register_maps.py</code> did for ConSLAM, but with the gravity stage replaced by
+      the rotation <code>align_map.py</code> already measured, which is a better estimate
+      than normals off the cloud because it comes from the filter that built the map.
+      <code>gen_cfg.py</code> grew a <code>--map-seq</code> mode, and
+      <code>run_seq.sh</code> a <code>NAME</code> so a cross-sequence run cannot overwrite
+      the own-map artefacts of the same bag.
+    </p>
+  </div>
+</section>

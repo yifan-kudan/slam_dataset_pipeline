@@ -1,0 +1,31 @@
+{
+  "seq": "site1_handheld_4",
+  "csv": "/home/kudan/kd_localizer_docker/results/hilti_2023_site2/run_site1_handheld_4_var_4.csv",
+  "pose_rows": 631,
+  "tracked_s": 63.0,
+  "status_counts": {
+    "UNINIT": 242,
+    "TRACKING": 1264,
+    "LOST": 4782
+  },
+  "first_lost": [
+    "Pose covariance is too high (Position Z)",
+    "1675087969.278"
+  ],
+  "inlier_median": 0.733,
+  "inlier_p05": 0.021,
+  "sigma_median": 6.64,
+  "sigma_p95": 19.58,
+  "sigma_peak": 195.11,
+  "gcp_total": 3,
+  "gcp_used": 1,
+  "gcp_span_s": 204.2,
+  "pairs": 0,
+  "mapframe_pos_log": "/home/kudan/prj/dataset/hilti_2023/site1_handheld_4_fastlio_bag/runs/imuq_r1.0/fastlio_log/pos_log.txt",
+  "mapframe_pairs": 630,
+  "mapframe_anchor_ms": 0.0,
+  "mapframe_median": 0.027,
+  "mapframe_p95": 8.756,
+  "mapframe_max": 101.68,
+  "mapframe_over_1m_pct": 10.79
+}

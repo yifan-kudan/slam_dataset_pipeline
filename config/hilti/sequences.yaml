@@ -1,0 +1,92 @@
+# The 15 Hilti 2023 sequences, and WHICH RUN each one's numbers come from.
+#
+# Every sequence is replayed against a .kdm built from its own FAST-LIO cloud, so a
+# map, its pos_log and the map frame they share all belong to one run. `run` names
+# that run (the directory under <bag>/runs/), which is why it is config and not a
+# constant: rebuilding a map from a different run means editing one line here, and
+# the evaluators, the report and the map builder all follow.
+#
+# Calibration and per-platform data are in platforms.yaml. Committed for the same
+# reason: dataset facts, no machine paths.
+
+# Used when a sequence does not name its own.
+#
+# imuq_r1.0 (2026-08-20) is the first run of the whole dataset that is both at full frame
+# rate AND independent of the playback rate. It took three fixes, found in this order:
+# the Fast DDS shared-memory segment (the writer was discarding half the clouds),
+# publish.map_publish_en (publish_map re-serialised the whole accumulated cloud every fire,
+# which starved the three robot sequences down to 41-80 %), and common.imu_queue_size
+# (reliable KeepLast(10) is 25 ms at 400 Hz, so IMU samples were lost and the estimate
+# depended on how fast the bag was played). rerun_r1.0 has the first two and r0.3_v2 is the
+# slow-playback control that exposed the third; both are kept for the comparison.
+#
+# Historical note on the first of those: every
+# earlier run was fed 45-52 % of the bag's clouds, because Fast DDS drops 1.37 MB samples
+# at the WRITER when the shared-memory segment cannot hold them. batch_fastlio.py now
+# exports config/dds/fastdds_shm_big.xml for the node and the player alike, so all 15
+# sequences are 99.7-99.9 % and directly comparable for the first time. The r0.15 / r0.3
+# runs are kept on disk and referenced below as alt_run, since the playback-rate and
+# frame-loss comparisons are the evidence for that claim.
+default_run: imuq_r1.0
+
+# LEADERBOARD vs ADDITIONAL. The release ships site2_handheld_4/5/6 in their own directory,
+# `site2_additional_handled`, alongside site_1_handled / site_2_robot / site_3_handled, and the
+# challenge leaderboard scores only the latter three groups. Their surveyed ground truth is also
+# thinner: 2, 4 and 2 control points against 4-7 everywhere else. Recorded here because the
+# 2026-08-26 odometry-mode campaign found all three of its failures and two of its three
+# odometry-mode engagements in this group -- a result that reads very differently depending on
+# whether the three are counted. `leaderboard: false` marks them; everything else is true.
+
+sequences:
+  # alt_run is the second run of the same sequence the report compares against: a
+  # repeat (robot_1, to show the t+632 s height incident does not reproduce) or the
+  # other playback rate. Naming it here is what stops a comparison from silently
+  # picking up whatever else happens to be on disk.
+  site2_robot_1:
+    platform: robot
+    site: 2
+    kdm: true
+    leaderboard: true
+    alt_run: r0.3_b
+    alt_score_tag: b
+  site2_robot_2:    {platform: robot,    site: 2, kdm: true, leaderboard: true}
+  site2_robot_3:    {platform: robot,    site: 2, kdm: true, leaderboard: true}
+  site1_handheld_1: {platform: handheld, site: 1, kdm: true, leaderboard: true}
+  site1_handheld_2: {platform: handheld, site: 1, kdm: true, leaderboard: true}
+  site1_handheld_3: {platform: handheld, site: 1, kdm: true, leaderboard: true}
+  site1_handheld_4: {platform: handheld, site: 1, kdm: true, leaderboard: true}
+  site1_handheld_5: {platform: handheld, site: 1, kdm: true, leaderboard: true}
+  site2_handheld_4:
+    platform: handheld
+    site: 2
+    kdm: true
+    leaderboard: false
+    alt_run: r0.15
+    alt_score_tag: r015
+  # kdm: false until 2026-08-20. The r0.3 run diverged (248 m/s peak) and produced no
+  # usable cloud; the divergence was frame loss, and at full frame rate the trajectory
+  # stays at 1.6 m/s, so a map is now built. It is still the weakest map in the set for a
+  # SEPARATE reason -- a ~37 m cp0->cp1 fold in the stairwell that frame loss never
+  # caused -- so treat its own-map run as a map-quality measurement, not a rig one.
+  site2_handheld_5:
+    platform: handheld
+    site: 2
+    kdm: true
+    leaderboard: false
+    alt_run: r0.15
+    alt_score_tag: r015
+  # Was pinned to r0.15 while r0.3 was the default: the r0.3 map was 1.4 m wrong across
+  # floors. Both were frame-starved, so the override is gone and this sequence follows
+  # default_run like the rest; r0.15 stays as the alt for that comparison.
+  site2_handheld_6:
+    platform: handheld
+    site: 2
+    kdm: true
+    leaderboard: false
+    alt_run: r0.15
+    alt_score_tag: r015
+    alt_score_tag: ""
+  site3_handheld_1: {platform: handheld, site: 3, kdm: true, leaderboard: true}
+  site3_handheld_2: {platform: handheld, site: 3, kdm: true, leaderboard: true}
+  site3_handheld_3: {platform: handheld, site: 3, kdm: true, leaderboard: true}
+  site3_handheld_4: {platform: handheld, site: 3, kdm: true, leaderboard: true}

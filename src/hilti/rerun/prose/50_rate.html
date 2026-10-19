@@ -1,0 +1,86 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">05</span> &nbsp;the third fix</p></div>
+  <h2>The estimate depended on how fast the bag was played</h2>
+  <div class="col">
+    <p>
+      With clouds at 99.8&nbsp;% and no gap over 0.10&nbsp;s,
+      <code>site2_handheld_6</code> scored 11.1, 14.3 and 15.4&nbsp;cm across three
+      <code>-r 0.3</code> runs and 54.9 and 55.7&nbsp;cm across two <code>-r 1.0</code>
+      runs. Tight within a rate; four times apart between them. The earlier finding that
+      "<code>-r</code> is not a knob" was about <em>frame loss</em>, which is writer-side
+      and therefore genuinely rate-independent — it does not extend to the estimate.
+    </p>
+    <p>
+      Decomposed along FAST-LIO's own gravity state, against the surveyed vector between
+      the two control points, the two rates disagree about different things on different
+      sequences:
+    </p>
+  </div>
+
+<pre><code>site2_handheld_4   surveyed  +5.497 m vertical   3.790 m horizontal
+  -r 0.3            +4.688 (-14.7 %)    3.877 (<span class="add">+2.3 %</span>)
+  -r 1.0            +4.118 (-25.1 %)    8.689 (<span class="del">+129 %</span>)
+
+site2_handheld_6   surveyed  -2.779 m vertical   1.927 m horizontal
+  -r 0.3            -2.482 (<span class="add">-10.7 %</span>)    2.130 (+10.5 %)
+  -r 1.0            -3.396 (<span class="del">+22.2 %</span>)    1.979 (+2.7 %)</code></pre>
+
+  <h3>Which rig, not which sequence</h3>
+  <div class="col">
+    <p>
+      Seven sequences were then run at both rates, chosen to span both rigs and to include
+      three controls with enough surveyed points to be worth reading — 28, 21 and 15
+      control-point pairs, against the single pair on <code>handheld_4</code>. The pattern
+      is not about which sequence is difficult. <b>Every sequence that moved is on the
+      400&nbsp;Hz handheld rig; the 200&nbsp;Hz robot is identical to three significant
+      figures.</b>
+    </p>
+    <p>
+      That points at one line. FAST-LIO subscribes to <code>/imu</code> with a bare
+      <code>10</code> — reliable <code>KeepLast(10)</code>, which is <b>25&nbsp;ms of
+      buffer at 400&nbsp;Hz</b> — on the same single-threaded executor as a LiDAR callback
+      that takes 4&ndash;8&nbsp;ms per scan with spikes. When that queue overflows the
+      reader loses IMU samples, and nothing anywhere logs it. Playing the bag at
+      three-tenths speed does not make the node faster; it makes the arrival rate slower,
+      which is why it looked like a rate effect.
+    </p>
+  </div>
+
+<pre><code><span class="cmt">laserMapping.cpp -- a new parameter, default 10 = upstream</span>
+<span class="del">-   sub_imu_ = this-&gt;create_subscription&lt;Imu&gt;(imu_topic, 10, imu_cbk);</span>
+<span class="add">+   sub_imu_ = this-&gt;create_subscription&lt;Imu&gt;(
++       imu_topic, rclcpp::QoS(rclcpp::KeepLast(imu_queue)), imu_cbk);</span>
+
+<span class="cmt">config/hilti/fast_lio_hilti*.yaml -- 5 s of buffer at 400 Hz.
+imu_cbk only pushes onto a deque, so depth costs memory and nothing else.</span>
+common:
+  imu_queue_size: 2000</code></pre>
+
+  <div class="col">
+    <p>
+      At <code>-r 1.0</code> with the deep queue, <code>site1_handheld_5</code> returns
+      <b>27.5 / 40.4&nbsp;cm at 1.188&nbsp;% relative — the <code>-r 0.3</code> figures to
+      four significant figures</b>. So the two arms are not merely similar: with a queue
+      deep enough not to overflow, real-time playback delivers the same input stream that
+      slow playback did, and the estimate is the same estimate.
+    </p>
+  </div>
+
+  {{tbl_rate}}
+
+  <div class="note">
+    <p class="eyebrow">What the residual says</p>
+    <p>
+      Two sequences do not close all the way — <code>site3_handheld_2</code> lands at
+      5.2&nbsp;cm against 3.8, and <code>site2_handheld_4</code> at 59.3 against 22.6. The
+      second is a one-pair score whose own scatter across runs of the same configuration
+      spans 22.6 to 59.3&nbsp;cm, so it cannot distinguish anything at that scale. The
+      first is a real residual of about 1.4&nbsp;cm on a 15-pair score, and the cloud
+      subscription is the obvious remaining candidate: it is still upstream
+      <code>KeepLast(5)</code>, deliberately, because a reliable deep queue there cannot
+      match a real LiDAR driver publishing best-effort. Not chased further — the whole
+      dataset is now inside a centimetre of its slow-playback self, and the canonical run
+      is at real time.
+    </p>
+  </div>
+</section>

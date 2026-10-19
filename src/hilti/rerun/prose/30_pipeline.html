@@ -1,0 +1,108 @@
+<section>
+  <div class="datum"><p class="eyebrow"><span class="n">03</span> &nbsp;the pipeline</p></div>
+  <h2>Seven steps, run in one order for all fifteen</h2>
+  <div class="col">
+    <p>
+      Each stage below produces exactly one artefact and the next stage reads it, which is
+      why the order is not negotiable: the map has to be levelled <em>before</em> it is
+      converted, because the levelling is applied by the converter; and the levelling
+      itself comes out of the FAST-LIO run that produced the cloud, so pairing a map with
+      another run's gravity state silently rotates everything downstream.
+    </p>
+  </div>
+
+  <div class="steps">
+    <div class="step"><div class="n">01</div><div>
+      <h3>The bag</h3>
+      <p>
+        Hilti ships ROS&nbsp;1 recordings. <code>src/rosbag1_to_ros2.py</code> re-containers
+        each one into a ROS&nbsp;2 bag carrying only <code>/velodyne_points</code> and
+        <code>/imu</code>, with the Hesai and Bpearl clouds repacked to the Velodyne field
+        layout so one handler reads both. Unchanged in this run — the same fifteen bags as
+        before.
+      </p>
+    </div></div>
+
+    <div class="step"><div class="n">02</div><div>
+      <h3>FAST-LIO, at full frame rate</h3>
+      <p>
+        <code>src/batch_fastlio.py --run-name rerun_r1.0 -r 1.0</code>, one bag at a time
+        because FAST-LIO is a single global ROS graph driven by <code>/clock</code>. Two
+        things every run gets whether it asks or not: the Fast&nbsp;DDS profile that stops
+        the writer discarding clouds, and frame accounting that <em>fails</em> a run below
+        95&nbsp;% of the bag's own cloud count. That second one is the point of this
+        campaign — see the next section.
+      </p>
+    </div></div>
+
+    <div class="step"><div class="n">03</div><div>
+      <h3>Score the trajectory</h3>
+      <p>
+        <code>src/hilti/eval_fastlio.py</code>: control-point pair distances against the
+        survey, plus three divergence detectors (<code>max |v|</code>, peak accelerometer
+        bias, worst displacement over any 9&nbsp;s window) and the frame percentage. The
+        detectors exist because a sequence can pass its control points and still have blown
+        up after the last one.
+      </p>
+    </div></div>
+
+    <div class="step"><div class="n">04</div><div>
+      <h3>Measure the map frame's gravity</h3>
+      <p>
+        <code>src/hilti/align_map.py</code> reads the mid-run median of FAST-LIO's own S2
+        gravity state and computes the rotation that levels it. This is not cosmetic:
+        kd_localizer seeds its ESKF gravity at the <em>map frame's</em> −Z and never
+        revisits the choice, while a FAST-LIO map frame is the IMU frame at the first
+        processed scan — so it inherits however the IMU was bolted on. The handheld rig
+        lands ~178–180° from that assumption and the robot ~90°.
+      </p>
+    </div></div>
+
+    <div class="step"><div class="n">05</div><div>
+      <h3>Cloud &rarr; levelled LAS</h3>
+      <p>
+        <code>pdal translate</code> with a <code>transformation</code> filter carrying the
+        matrix from step 4, quantised to 1&nbsp;mm rather than PDAL's 1&nbsp;cm default —
+        LAS stores integers, and a centimetre is coarse next to a 0.25&nbsp;m plane voxel
+        fitted to 0.01&nbsp;m.
+      </p>
+    </div></div>
+
+    <div class="step"><div class="n">06</div><div>
+      <h3>LAS &rarr; .kdm</h3>
+      <p>
+        The release ships <code>build_map</code> as a Polyscope GUI with no working CLI, so
+        a small headless driver calls the same shipped entry points —
+        <code>PlaneMap::construct</code>, <code>Bbs3dMap::construct</code>,
+        <code>LocalizerMap::save</code>. Library defaults throughout: 0.25&nbsp;m plane
+        voxels, 0.01&nbsp;m plane-fit sigma, a 3D-BBS pyramid at twice the voxel size over
+        seven levels.
+      </p>
+    </div></div>
+
+    <div class="step"><div class="n">07</div><div>
+      <h3>Replay the bag against the map</h3>
+      <p>
+        <code>kd_localizer_node</code> inside the Humble release container, <code>-r 1</code>,
+        <code>track_only</code> true, relocalizer off, <code>use_sim_time</code> true. Ten
+        of the fifteen bags were re-containered without <code>/tf_static</code>, so
+        <code>imu_link → velodyne</code> is republished at run time; without it the node sits
+        at UNINITIALIZED forever, because it has to look the extrinsic up in TF while
+        FAST-LIO reads its own from config.
+      </p>
+    </div></div>
+  </div>
+
+  <div class="note">
+    <p class="eyebrow">Why <code>-r 1</code> and not slower</p>
+    <p>
+      Both stages play at real time and neither wants anything else. kd_localizer has a
+      20&nbsp;Hz <code>process_frequency</code>, so playing faster discards frames outright,
+      and playing slower buys nothing because it is not on a best-effort subscription.
+      FAST-LIO <em>is</em> best-effort, but its loss was writer-side, which is
+      rate-independent — the earlier r0.15 and r0.3 runs lost 49.2&nbsp;% and 50.2&nbsp;%
+      of their clouds respectively, and that near-equality is what proves rate was never
+      the knob.
+    </p>
+  </div>
+</section>

@@ -23,25 +23,20 @@ from rosbags.highlevel import AnyReader
 # are overridable per run via --time-fields / --ring-fields.
 from pc2_layout import (
     DEFAULT_RING_FIELDS, DEFAULT_TIME_FIELDS, TIME_UNIT_TO_NS,
-    epoch_kind, field_view, find_field, guess_time_unit, type_name,
+    epoch_kind, field_view, find_field, infer_time_unit, type_name,
 )
 
 
-# Absolute gap tolerance for bags with no PointCloud2 topic to derive one from.
+# Gap tolerance for bags with no PointCloud2 topic to derive one from.
 # 0.1s is one frame of a 10Hz lidar -- see ``resolve_gap_floor``.
 FALLBACK_GAP_FLOOR_S = 0.1
 
 
 def diffs_s(stamps_ns: list[int]) -> np.ndarray:
-    """Adjacent stamp spacings, in seconds (empty for fewer than 2 stamps).
-
-    The subtraction happens in int64: ns-epoch stamps are ~1.7e18, well past
-    float64's exact-integer range, so converting before differencing would
-    silently drop sub-microsecond bits.
-    """
+    """Return the spacing of a sorted-by-arrival stamp sequence, in seconds."""
     if len(stamps_ns) < 2:
         return np.empty(0)
-    return np.diff(np.asarray(stamps_ns, dtype=np.int64)) / 1e9  # convert to seconds
+    return np.diff(np.asarray(stamps_ns, dtype=np.int64)) / 1e9
 
 
 def median_dt_s(d: np.ndarray) -> float:
@@ -57,12 +52,7 @@ def median_dt_s(d: np.ndarray) -> float:
 
 
 def resolve_gap_floor(cloud_periods: list[float]) -> float:
-    """Absolute gap tolerance: a hole shorter than one lidar frame is harmless.
-
-    What makes a hole matter downstream is whether it can leave a scan-to-scan
-    window with no IMU to preintegrate, so the tolerance is one lidar frame --
-    and that has to come from this bag's measured period, not an assumed 10Hz.
-    Given several clouds the fastest one starves first, so its period binds.
+    """Gap tolerance setup.To avoid no IMU to preintegrate, the tolerance is one lidar frame.
     """
     return min(cloud_periods) if cloud_periods else FALLBACK_GAP_FLOOR_S
 
@@ -75,11 +65,8 @@ def dt_stats(stamps_ns: list[int], gap_factor: float = 3.0,
     d = diffs_s(stamps_ns)
     monotonic = bool(np.all(d >= 0))
     median = median_dt_s(d)
-    # Two rules, whichever is looser. ``gap_factor`` is relative and carries the
-    # low-rate topics: at 3.0 a lone dropped message (dt = 2x median) passes and
-    # only 2+ consecutive losses flag. It is useless on high-rate topics, where
-    # 3x median sits inside normal jitter -- hence the absolute floor, added to
-    # the median so the threshold always clears the nominal period.
+    # Gap detection: a gap is a spacing that is either (a) more than ``gap_factor``
+    # times the median spacing, or (b) more than ``gap_floor_s`` seconds.
     gap_thresh = max(gap_factor * median, median + gap_floor_s) if median else float("inf")
     gaps = int(np.count_nonzero(d > gap_thresh))
     return {
@@ -103,10 +90,7 @@ def stamp_ns(header) -> int:
 def describe_pointcloud(msg, time_fields: tuple[str, ...] = DEFAULT_TIME_FIELDS,
                         ring_fields: tuple[str, ...] = DEFAULT_RING_FIELDS) -> dict[str, Any]:
     """Layout of one PointCloud2: field table plus what a converter config needs.
-
-    ``time_fields`` / ``ring_fields`` are the candidate names to probe, in
-    priority order -- the only dataset-dependent input here. The full field list
-    is reported regardless, so a name outside the candidates is still visible.
+    ``time_fields`` / ``ring_fields`` are the candidate names to probe.
     """
     fields = [{"name": f.name, "offset": int(f.offset),
                "datatype": type_name(f.datatype), "count": int(f.count)}
@@ -134,7 +118,7 @@ def describe_pointcloud(msg, time_fields: tuple[str, ...] = DEFAULT_TIME_FIELDS,
     if tfield is not None and info["n_points"] > 0:  # min/max needs at least a point
         arr = field_view(bytes(msg.data), msg, tfield)
         tmin, tmax = float(arr.min()), float(arr.max())
-        unit = guess_time_unit(tmax - tmin)
+        unit = infer_time_unit(tmax - tmin)
         info["point_time_field"] = tfield.name
         info["point_time_dtype"] = type_name(tfield.datatype)
         info["point_time_min"] = tmin
@@ -285,7 +269,8 @@ def print_report(r: dict[str, Any]) -> None:
         if st.get("kind") == "pointcloud2":
             print(f"    cloud:     {st['n_points']} pts  point_step={st['point_step']}  "
                   f"frame={st.get('frame_id')}")
-            print(f"    fields:    {', '.join(f'{f['name']}@{f['offset']}:{f['datatype']}' for f in st['fields'])}")
+            cols = ", ".join(f"{f['name']}@{f['offset']}:{f['datatype']}" for f in st["fields"])
+            print(f"    fields:    {cols}")
             if st.get("is_bigendian"):
                 print("    WARNING:   is_bigendian=True")
             if st.get("non_scalar_fields"):

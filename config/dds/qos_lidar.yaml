@@ -1,0 +1,15 @@
+# QoS override for `ros2 bag play --qos-profile-overrides-path`.
+#
+# Belt and braces for the slow-consumer loss described in fast_lio_hilti_dense_traj.yaml:
+# RELIABLE only guarantees delivery of what the writer still holds, and with keep_last the
+# writer overwrites un-acked samples as soon as its history fills. keep_all makes the player
+# block instead of overwrite, so a stall costs wall-clock rather than frames.
+/velodyne_points:
+  history: keep_all
+  reliability: reliable
+  durability: volatile
+/tf_static:
+  history: keep_last
+  depth: 10
+  reliability: reliable
+  durability: transient_local
